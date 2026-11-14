@@ -30,7 +30,7 @@ import { registerCodebuddySettings, resolveSpawnableCommand } from './settings.j
 import type { EffectiveCodebuddySettings } from './settings.js'
 import { registerCodebuddyModelsRoute } from './models-route.js'
 import { createModelCapabilityIndex } from './model-capabilities.js'
-import { registerDshMcpServer } from '@flg1217/dsh-mcp'
+import { registerDshMcpServer } from '@flg1217/dsh-mcp-tool-server'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { sweepStaleMcpConfigs } from './mcp-config.js'
 import { installModelSwitchToolGuide } from './tool-guide.js'
@@ -154,7 +154,7 @@ export function apply(ctx: Context, config: Config): void {
   // 每个 CodeBuddy 进程启动前(pump/adapter)还会再同步,保证读到最新。
   syncCliIntegrations()
 
-  // dsh MCP server(共享包 @flg1217/dsh-mcp):把会话可见的 dsh 工具以 MCP
+  // dsh MCP server(共享包 @flg1217/dsh-mcp-tool-server):把会话可见的 dsh 工具以 MCP
   // 暴露给 CLI(bridgeMode=mcp 时 spawn 以 --mcp-config 连接)。注册幂等:
   // 共享包 / llm-agy / 本插件同时调用时只有第一个生效,key 不会被覆盖。
   // 用 ctx.effect 接管释放函数:插件卸载/热重载时摘掉路由并作废端点 key。

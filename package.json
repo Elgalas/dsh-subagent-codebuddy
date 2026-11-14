@@ -1,6 +1,6 @@
 {
   "name": "@flg1217/dsh-subagent-codebuddy",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "CodeBuddy CLI (Tencent) as a dsh LLM provider via ACP: selectable as a main-agent model (the ACP CLI owns the turn and its tools) and as a subagent backend through the generic subagent tool; exposes the CLI model catalog via listModels().",
   "type": "module",
   "main": "./lib/index.js",
@@ -34,7 +34,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@flg1217/dsh-mcp": "github:Elgalas/dsh-subagent-codebuddy#53cba422faa9ec2b400d2662fd4ed9fb01879285",
+    "@flg1217/dsh-mcp-tool-server": "github:Elgalas/dsh-subagent-codebuddy#395ea3f5a7f731fd23cb4c70d46fe7d583c1252e",
     "@deepseek-ai/dsh-llm": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-settings": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-subagent": "^0.2.1-alpha.2",
@@ -79,6 +79,6 @@
     "@deepseek-ai/dsh-shell": "^0.2.1-alpha.2",
     "@deepseek-ai/schemastery": "^3.0.0",
     "@deepseek-ai/cordis": ">=0.1.0-rc.6",
-    "@flg1217/dsh-mcp": "^0.1.1"
+    "@flg1217/dsh-mcp-tool-server": "^0.1.2"
   }
 }

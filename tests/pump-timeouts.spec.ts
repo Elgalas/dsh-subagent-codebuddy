@@ -2,7 +2,7 @@
  * MCP 转发看门狗取值约束(回归)。
  *
  * 从原 tests/mcp-server.spec.ts 拆出:该约束测的是本插件 pump 的常量
- * (端点本身在共享包 @flg1217/dsh-mcp,不含超时预算)。
+ * (端点本身在共享包 @flg1217/dsh-mcp-tool-server,不含超时预算)。
  */
 import { describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'

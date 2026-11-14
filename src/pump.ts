@@ -54,8 +54,8 @@ import {
   McpDispatchTimeoutError,
   registerDshMcpServer,
   registerMcpLoopDispatcher,
-} from '@flg1217/dsh-mcp'
-import type { DshToolRunResult } from '@flg1217/dsh-mcp'
+} from '@flg1217/dsh-mcp-tool-server'
+import type { DshToolRunResult } from '@flg1217/dsh-mcp-tool-server'
 import { syncCliIntegrations } from './cli-integrations.js'
 import { steerDebug } from './steer-debug.js'
 import { mcpConfigArgs } from './mcp-config.js'

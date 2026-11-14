@@ -55,18 +55,20 @@
 
 ### 安装插件
 
-`@flg1217/dsh-mcp` 由宿主 profile 提供。使用包含 dsh 0.2.2 工具准入修复的共享包 `0.1.1`。先安装共享包，再把 CodeBuddy 插件装入同一个 profile。用桌面版时，在「插件」页面按此顺序添加两个 GitHub 来源。
+`@flg1217/dsh-mcp-tool-server` 由宿主 profile 提供。使用包含 dsh 0.2.2 工具准入修复的共享包 `0.1.2`。先安装共享包，再把 CodeBuddy 插件装入同一个 profile。用桌面版时，在「插件」页面按此顺序添加两个 GitHub 来源。
+
+从 `0.1.1` 迁移时，更新 CodeBuddy 插件后移除同一 profile 里的旧共享包 `@flg1217/dsh-mcp`。如果同一 profile 还有插件依赖旧包，请先迁移那些插件，避免新旧桥同时启用。
 
 ```bash
-dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#53cba422faa9ec2b400d2662fd4ed9fb01879285
+dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#395ea3f5a7f731fd23cb4c70d46fe7d583c1252e
 dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#master
 ```
 
 使用本地安装包时：
 
 ```bash
-dsh plugin --profile web add ./flg1217-dsh-mcp-0.1.1.tgz
-dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.1.tgz
+dsh plugin --profile web add ./flg1217-dsh-mcp-tool-server-0.1.2.tgz
+dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.2.tgz
 ```
 
 从源码目录安装时，pnpm 可能创建本地链接，导致插件从源码目录解析依赖，找不到装在 profile 里的共享包。更新现有的链接安装时，先从该 profile 移除旧的 CodeBuddy 插件，再安装打包产物。
@@ -255,7 +257,7 @@ pnpm test           # vitest 单元测试
 pnpm typecheck      # tsc --noEmit
 ```
 
-> 本地构建从本仓库 `dsh-mcp` 分支的固定提交获取已构建的共享包。运行时由 profile 安装同版本的共享模块，满足插件的 peer dependency。
+> 本地构建从本仓库 `dsh-mcp-tool-server` 分支的固定提交获取已构建的共享包。运行时由 profile 安装同版本的共享模块，满足插件的 peer dependency。
 
 ### 分发与发布
 
