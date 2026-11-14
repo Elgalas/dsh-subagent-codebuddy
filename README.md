@@ -60,7 +60,7 @@
 从 `0.1.1` 迁移时，更新 CodeBuddy 插件后移除同一 profile 里的旧共享包 `@flg1217/dsh-mcp`。如果同一 profile 还有插件依赖旧包，请先迁移那些插件，避免新旧桥同时启用。
 
 ```bash
-dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#395ea3f5a7f731fd23cb4c70d46fe7d583c1252e
+dsh plugin --profile web add github:Elgalas/dsh-mcp-tool-server#947182d90a2188c80a4e0d096017142527ca9679
 dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#master
 ```
 
@@ -257,7 +257,7 @@ pnpm test           # vitest 单元测试
 pnpm typecheck      # tsc --noEmit
 ```
 
-> 本地构建从本仓库 `dsh-mcp-tool-server` 分支的固定提交获取已构建的共享包。运行时由 profile 安装同版本的共享模块，满足插件的 peer dependency。
+> 本地构建从独立的 `Elgalas/dsh-mcp-tool-server` 仓库获取固定提交的共享包。运行时由 profile 安装同版本的共享模块，满足插件的 peer dependency。
 
 ### 分发与发布
 

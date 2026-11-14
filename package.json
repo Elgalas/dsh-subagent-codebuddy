@@ -34,7 +34,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@flg1217/dsh-mcp-tool-server": "github:Elgalas/dsh-subagent-codebuddy#395ea3f5a7f731fd23cb4c70d46fe7d583c1252e",
+    "@flg1217/dsh-mcp-tool-server": "github:Elgalas/dsh-mcp-tool-server#947182d90a2188c80a4e0d096017142527ca9679",
     "@deepseek-ai/dsh-llm": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-settings": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-subagent": "^0.2.1-alpha.2",
