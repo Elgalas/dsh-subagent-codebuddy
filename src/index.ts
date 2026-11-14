@@ -31,6 +31,7 @@ import type { EffectiveCodebuddySettings } from './settings.js'
 import { registerCodebuddyModelsRoute } from './models-route.js'
 import { createModelCapabilityIndex } from './model-capabilities.js'
 import { registerDshMcpServer } from '@flg1217/dsh-mcp'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { sweepStaleMcpConfigs } from './mcp-config.js'
 import { installModelSwitchToolGuide } from './tool-guide.js'
 import type {} from '@deepseek-ai/dsh-settings'
@@ -194,13 +195,27 @@ export function apply(ctx: Context, config: Config): void {
   // LLM provider 路由:主代理选择与子代理委派的推理都走 CodeBuddy。
   // /compact 转发与 adapter 共用同一会话映射(acpId → dsh 会话)。
   const conversations = new ConversationStore()
+  const admittedTools = new WeakMap<object, ReadonlySet<string>>()
+  ctx.inject(['tools', 'systemPrompt'], (child) => {
+    child.on('system-prompt/assemble', (_presentation, assembly, next) => {
+      const { scope, toolSet } = assembly
+      if (scope !== undefined && typeof scope === 'object' && toolSet !== undefined) {
+        admittedTools.set(scope, new Set(child.tools.schemas(scope, toolSet).map(tool => tool.name)))
+      }
+      return next()
+    })
+  })
   ctx.llm.registerAdapter([providerName], new CodebuddyLlmAdapter(ctx, {
     command: resolved.command,
     prefixArgs: resolved.args,
     modelOf: () => settingsOf().model,
     permissionMode: eff.permissionMode,
     extraArgs: config.extraArgs,
-    bridgeMode: eff.bridgeMode,
+    bridgeModeOf: () => settingsOf().bridgeMode,
+    admittedToolsOf: (sessionId) => {
+      const agent = ctx.get('agents')?.get(sessionId as SessionId)
+      return agent === undefined ? undefined : admittedTools.get(agent)
+    },
     store: conversations,
     capabilities,
     // 静默长工具硬顶(分钟 → 毫秒;0 = 关闭)。看门狗超顶时 cancel+强杀,走

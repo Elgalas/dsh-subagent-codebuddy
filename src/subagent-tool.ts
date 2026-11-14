@@ -158,7 +158,7 @@ export function registerSubagentTool(ctx: Context, options: SubagentToolOptions)
         const started = await ctx.subagents.startActivation({
           provider,
           label: args.description,
-          request,
+          ...request,
           signal: exec.signal,
           delivery: 'parent',
         })
@@ -167,7 +167,7 @@ export function registerSubagentTool(ctx: Context, options: SubagentToolOptions)
       const activation = await ctx.subagents.startActivation({
         provider,
         label: args.description,
-        request,
+        ...request,
         signal: exec.signal,
         delivery: 'caller',
       })

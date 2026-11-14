@@ -15,7 +15,7 @@
 | **子代理 provider** | 通用 dsh `subagent` 工具可传 `provider: codebuddy` 委派（配合 `subagent-model-selection` 设置）；进程内 child agent、可并行、`send_message` 续聊 |
 | **模型目录** | adapter 实现 `listModels()`（带缓存、永不抛错），主选择器与 `list_subagent_models` 共用 |
 | **推理强度** | CLI `--effort` 档位（low / medium / high / xhigh / max / ultracode）暴露到 dsh 模型选择器；子代理可用 `reasoning_effort` 参数指定 |
-| **图片输入/读取** | 输入：图片块读字节后以 **ACP 原生 image 内容块**（base64）随 prompt 发送（`promptCapabilities.image`，不落盘）；读取：**按模型模态分流**——多模态模型（CLI `models.json` 的 `supportsImages: true`）用 dsh 的 `read_image`，图片以 **MCP image 内容块**回到 CLI 侧模型、同时进 dsh 会话出图片卡片；仅文本/未登记模型用 `read_image_agy`（AGY 转述成文字）。历史种子与子代理转录里的图片经 CodeBuddy blob（内容寻址）双向原生转换，两侧均可预览 |
+| **图片输入/读取** | 图片以 ACP 原生 `image` 内容块随 prompt 发送。文件可经 CLI 原生 `Read` 读取，也可以使用宿主提供的 `read_image`。AGY 转述工具在宿主有提供时可作备选。历史种子与子代理转录通过 CodeBuddy blob 转换图片。 |
 | **子代理可视化** | codebuddy 轮里的 `Agent` 委派镜像为 **dsh 子会话**（`parentSession` 血缘 + `subagent/descriptor`），侧边栏可点开完整转录（消息/工具/思考/任务），运行中近实时跟随 |
 | **任务/todo** | 走 dsh 原生 `todo_write`（工具桥一等公民，主轮与子代理会话都复用 dsh 的 TodoPanel 渲染）；CLI 侧 `TaskCreate`/`TaskUpdate` 已随内置工具禁用，`todo-bridge` 保留作旧会话重放兼容 |
 | **工具桥（MCP / delegate）** | 把本会话可见的 dsh 工具暴露给 CodeBuddy，使它的文件/命令类能力走 dsh 管线（审批/沙箱/审计/后台面板）。默认 `mcp`：dsh 起 HTTP MCP server，工具以 `mcp__dsh__<名>` 一等公民呈现（完整 JSON Schema 强约束）；`delegate` 为旧通道（`dsh_<名>` 合成 DelegateTool），保留作回退 |
@@ -48,17 +48,28 @@
 
 ### 系统要求
 
-- dsh `>= 0.1.3-alpha.2`（验证于 0.1.3-alpha.2）
+- 此版本在 dsh `0.2.2-rc.3` 上验证，专用子代理工具使用新版 `startActivation` 接口。
 - CodeBuddy CLI 已安装并登录（子进程继承登录态）
 - 需运行在**带 `webServer` 服务的 profile**（如 `web`）：`bridgeMode: mcp` 依赖它挂
   MCP 端点；拿不到该服务时端点不注册，`--mcp-config` 不注入（不会报错，但工具桥不可用）
 
 ### 安装插件
 
+`@flg1217/dsh-mcp` 由宿主 profile 提供。使用包含 dsh 0.2.2 工具准入修复的共享包 `0.1.1`。先安装共享包，再把 CodeBuddy 插件装入同一个 profile。用桌面版时，在「插件」页面按此顺序添加两个 GitHub 来源。
+
 ```bash
-node scripts/link-profile.mjs            # 默认装配进 web profile
-# 或等价于:dsh plugin --profile web add <本仓库目录>
+dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#53cba422faa9ec2b400d2662fd4ed9fb01879285
+dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#master
 ```
+
+使用本地安装包时：
+
+```bash
+dsh plugin --profile web add ./flg1217-dsh-mcp-0.1.1.tgz
+dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.1.tgz
+```
+
+从源码目录安装时，pnpm 可能创建本地链接，导致插件从源码目录解析依赖，找不到装在 profile 里的共享包。更新现有的链接安装时，先从该 profile 移除旧的 CodeBuddy 插件，再安装打包产物。
 
 插件行由插件自带的 `cordis.patch.yml`（bundle patch）自动注入，默认配置开箱即用。
 需要覆盖默认值时，在 profile 的 `cordis.patch.yml` 用同 id 覆盖：
@@ -158,7 +169,7 @@ close）且调用最终完成时，把结果作为一条 notice 投进会话；�
 也会补投：它正是防止同一副作用跑两遍的关键，丢在一个已经消失的响应里等于没说。
 
 **诊断落盘**：桥的关键诊断（客户端等待时长、兜底超时、回落直执、补投失败）除
-`console.error` 外还会追加到 `~/.dsh/codebuddy/mcp-bridge.log`。控制台日志会随终端滚掉，
+`console.error` 外还会追加到 `~/.dsh/dsh-mcp/mcp-bridge.log`。控制台日志会随终端滚掉，
 而"CLI 到底有没有放弃这次调用"必须可事后核对——其中打印的**客户端等待**时长就是
 CLI 侧工具超时 T_client。`pump.ts` 的 `MCP_CALL_TIMEOUT_MS` 若要收紧必须以这个值为据，
 **不要**拿尾注里那句未经验证的 30s 反推（曾这样推成 25s 并造成回归，有回归用例钉住）。
@@ -244,14 +255,11 @@ pnpm test           # vitest 单元测试
 pnpm typecheck      # tsc --noEmit
 ```
 
-> **本仓库的 `pnpm install` 只在开发机上可用**：`package.json` 的 `devDependencies` 用了
-> `link:<绝对路径>` 形式指向 dsh 源码树（本地联调需要）。
-> 换机器前需把它们改成正常的版本号（如 `>=0.1.3-alpha.2`）或 `workspace:*`。
-> 仅**使用**插件（不构建）的人不受影响——运行时 `lib/` 只依赖相对路径与 peerDependencies。
+> 本地构建从本仓库 `dsh-mcp` 分支的固定提交获取已构建的共享包。运行时由 profile 安装同版本的共享模块，满足插件的 peer dependency。
 
 ### 分发与发布
 
-分发走 **git（不做 npm publish）**：使用者把本仓库目录加进 profile 即可，`lib/` 已随仓库提交。
+分发走 **git（不做 npm publish）**。本地 checkout 可直接打包，`lib/` 已随仓库提交。
 
 发布前检查：
 

@@ -62,6 +62,8 @@ export interface CodebuddyAdapterOptions {
      * HTTP MCP server;delegate = 旧 DelegateTool 通道(不加该参数)。
      */
     bridgeMode?: 'mcp' | 'delegate';
+    bridgeModeOf?: () => 'mcp' | 'delegate';
+    admittedToolsOf?: (sessionId: string) => ReadonlySet<string> | undefined;
     /** 动态空闲超时预算(可选,默认见 {@link DEFAULT_ACP_RUN_TIMEOUTS})。 */
     timeouts?: AcpTimeouts;
     /** 静默失败自动重试次数(默认 2:首次 + 1 次续跑)。 */

@@ -81,6 +81,7 @@ export interface PumpHost {
      * MCP server、不发 delegate 注册;delegate = 旧 DelegateTool 通道。
      */
     bridgeMode?: 'mcp' | 'delegate';
+    admittedTools?: ReadonlySet<string>;
     /** 推理强度(--effort;未选则不传,保持 CLI 默认)。 */
     reasoningEffort?: string;
     timeouts?: AcpTimeouts;
@@ -260,6 +261,7 @@ export declare class TurnPump {
     private acpSessionId;
     private capturing;
     private readonly deps;
+    private admittedTools;
     private readonly to;
     private readonly maxAttempts;
     private readonly retryDelayMs;
@@ -400,6 +402,7 @@ export declare class TurnPump {
     constructor(deps: PumpHost, signal: AbortSignal | undefined, stepState: PumpStepState);
     /** 回放工具 → 当前泵(未在跑/已收尾时为 undefined)。 */
     static forSession(sessionId: string): TurnPump | undefined;
+    updateAdmittedTools(tools: ReadonlySet<string> | undefined): void;
     /** 回合是否已被调用方中止(abort 交给 loop 的中断语义收尾)。 */
     private get aborted();
     /**

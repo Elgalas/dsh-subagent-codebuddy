@@ -1134,7 +1134,8 @@ describe('真工具直发(delegate → dsh 原生工具/卡片)', () => {  it('d
         step: 2,
         message: {
           source: { kind: 'tool', callId },
-          content: [{ type: 'tool-result', toolCallId: callId, content: [{ type: 'text', text: 'mcp-executed' }] }],
+          toolCallId: callId,
+          content: [{ type: 'text', text: 'mcp-executed' }],
         },
       },
     })

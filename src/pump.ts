@@ -82,6 +82,22 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
  */
 export const LATE_MCP_RESULT_TTL_MS = 24 * 60 * 60_000
 
+function toolResultOf(data: unknown): (DshToolRunResult & { callId: string }) | undefined {
+  const message = (data as { message?: {
+    source?: { callId?: string }
+    toolCallId?: string
+    content?: readonly unknown[]
+    isError?: boolean
+  } } | undefined)?.message
+  if (message === undefined) return undefined
+  const block = message.content?.[0] as { toolCallId?: string; content?: readonly unknown[]; isError?: boolean } | undefined
+  const callId = message.toolCallId ?? block?.toolCallId ?? message.source?.callId
+  if (typeof callId !== 'string') return undefined
+  const owner = block?.toolCallId === callId && message.toolCallId === undefined ? block : message
+  const content = owner.content ?? []
+  return { callId, content, output: blocksToText(content), isError: owner.isError === true }
+}
+
 /**
  * @param ctx - 插件上下文(事件面)。
  * @param sessionId - 目标 dsh 会话。
@@ -110,20 +126,11 @@ export function watchLateMcpResult(
     if (event?.type !== 'tool/result') return
     const sid = typeof session?.header?.id === 'string' ? session.header.id : session?.id
     if (sid !== sessionId) return
-    const message = (event.data as {
-      message?: {
-        source?: { callId?: unknown }
-        content?: readonly { toolCallId?: unknown; content?: readonly unknown[] }[]
-      }
-    } | undefined)?.message
-    const block = message?.content?.[0]
-    const cid = typeof block?.toolCallId === 'string'
-      ? block.toolCallId
-      : (typeof message?.source?.callId === 'string' ? message.source.callId : undefined)
-    if (cid !== callId) return
+    const result = toolResultOf(event.data)
+    if (result?.callId !== callId) return
     done = true
     off?.()
-    sink?.(toolName, blocksToText(Array.isArray(block?.content) ? block.content as readonly unknown[] : []))
+    sink?.(toolName, result.output)
   })
   const timer = setTimeout(() => { done = true; off?.() }, ttlMs)
   timer.unref?.()
@@ -197,6 +204,7 @@ export interface PumpHost {
    * MCP server、不发 delegate 注册;delegate = 旧 DelegateTool 通道。
    */
   bridgeMode?: 'mcp' | 'delegate'
+  admittedTools?: ReadonlySet<string>
   /** 推理强度(--effort;未选则不传,保持 CLI 默认)。 */
   reasoningEffort?: string
   timeouts?: AcpTimeouts
@@ -466,6 +474,7 @@ export class TurnPump {
   private acpSessionId = ''
   private capturing = true
   private readonly deps: PumpHost
+  private admittedTools: ReadonlySet<string> | undefined
   private readonly to: typeof DEFAULT_ACP_RUN_TIMEOUTS & AcpTimeouts
   private readonly maxAttempts: number
   private readonly retryDelayMs: number
@@ -634,6 +643,7 @@ export class TurnPump {
 
   constructor(deps: PumpHost, private readonly signal: AbortSignal | undefined, stepState: PumpStepState) {
     this.deps = deps
+    this.admittedTools = deps.admittedTools
     this.stepState = stepState
     this.to = { ...DEFAULT_ACP_RUN_TIMEOUTS, ...deps.timeouts }
     this.maxAttempts = deps.maxAttempts ?? 2
@@ -655,6 +665,7 @@ export class TurnPump {
     this.disposeLoopDispatcher = registerMcpLoopDispatcher(
       deps.dshSessionId,
       (_sessionId, name, input, lateSink) => this.dispatchMcpCall(name, input, lateSink),
+      () => this.admittedTools,
     )
     // 常驻任务表重播:CodeBuddy 任务列表跨回合常驻,dsh 的 todos 投影在每个
     // turn/start 清空——回合开头重写一份当前快照,面板跨回合继续显示同一计划。
@@ -665,6 +676,10 @@ export class TurnPump {
   /** 回放工具 → 当前泵(未在跑/已收尾时为 undefined)。 */
   static forSession(sessionId: string): TurnPump | undefined {
     return livePumps.get(sessionId)
+  }
+
+  updateAdmittedTools(tools: ReadonlySet<string> | undefined): void {
+    this.admittedTools = tools
   }
 
   /** 回合是否已被调用方中止(abort 交给 loop 的中断语义收尾)。 */
@@ -819,6 +834,7 @@ export class TurnPump {
       const bridgeTools = this.bridgeMode === 'mcp' || parentAgent === undefined
         ? []
         : listDshBridgeTools(this.deps.ctx, parentAgent)
+          .filter(tool => this.admittedTools?.has(bridgeTargetTool(tool.id) ?? '') ?? true)
       // 诊断:名单与注册结果落 dsh-start.log——"某桥工具 not found"时第一时间
       // 区分"名单就没生成它"(dsh 侧 schemas 缺失)还是"CLI 侧注册丢失"。
       console.error(`[codebuddy-bridge] session=${this.deps.dshSessionId} mode=${this.bridgeMode} announce ${bridgeTools.length}: ${bridgeTools.map(tool => tool.id).join(',') || '(none)'}`)
@@ -1421,29 +1437,16 @@ export class TurnPump {
       return
     }
     if (event?.type !== 'tool/result') return
-    const message = (event.data as {
-      message?: {
-        source?: { callId?: unknown }
-        content?: readonly { toolCallId?: unknown; content?: readonly unknown[]; isError?: unknown }[]
-      }
-    } | undefined)?.message
-    const block = message?.content?.[0]
-    const callId = typeof block?.toolCallId === 'string'
-      ? block.toolCallId
-      : (typeof message?.source?.callId === 'string' ? message.source.callId : undefined)
-    if (callId === undefined) return
+    const parsed = toolResultOf(event.data)
+    if (parsed === undefined) return
+    const { callId, ...result } = parsed
     // MCP 转发调用:结果回填 MCP 响应(先于 delegate 通道匹配)。
     const mcpWaiter = this.mcpWaiters.get(callId)
     if (mcpWaiter !== undefined) {
       this.mcpWaiters.delete(callId)
       // content 原样回传:MCP 端点据此把图片块转成 MCP image 内容块(纯文本
       // 时端点仍用 output,逐字与历史一致)。
-      const content = Array.isArray(block?.content) ? block.content as readonly unknown[] : []
-      mcpWaiter.resolve({
-        output: blocksToText(content),
-        isError: block?.isError === true,
-        content,
-      })
+      mcpWaiter.resolve(result)
       return
     }
     // 转发已超时、结果迟到的 MCP 调用:经投递口补投回会话(CLI 当时只收到
@@ -1451,16 +1454,13 @@ export class TurnPump {
     const late = this.lateMcpCalls.get(callId)
     if (late !== undefined) {
       this.lateMcpCalls.delete(callId)
-      late.sink?.(late.name, blocksToText(Array.isArray(block?.content) ? block.content as readonly unknown[] : []))
+      late.sink?.(late.name, result.output)
       return
     }
     const waiter = this.delegateWaiters.get(callId)
     if (waiter !== undefined) {
       this.delegateWaiters.delete(callId)
-      waiter.resolve({
-        output: blocksToText(Array.isArray(block?.content) ? block.content as readonly unknown[] : []),
-        isError: block?.isError === true,
-      })
+      waiter.resolve(result)
       return
     }
     // 只缓存 **delegate 直发的**未认领结果:真工具直发后所有工具执行都写
@@ -1470,10 +1470,7 @@ export class TurnPump {
     const call = this.calls.get(callId)
     if (call === undefined || call.rawName !== 'delegate_tool') return
     // 结果先到(loop 执行快、delegateTool 请求稍后才来):缓存,认领时取走。
-    this.delegateResults.set(callId, {
-      output: blocksToText(Array.isArray(block?.content) ? block.content as readonly unknown[] : []),
-      isError: block?.isError === true,
-    })
+    this.delegateResults.set(callId, result)
   }
 
   /** 发射真工具块后,认领可能已挂起的 delegate 请求(请求先到场景)。 */

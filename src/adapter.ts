@@ -175,6 +175,8 @@ export interface CodebuddyAdapterOptions {
    * HTTP MCP server;delegate = 旧 DelegateTool 通道(不加该参数)。
    */
   bridgeMode?: 'mcp' | 'delegate'
+  bridgeModeOf?: () => 'mcp' | 'delegate'
+  admittedToolsOf?: (sessionId: string) => ReadonlySet<string> | undefined
   /** 动态空闲超时预算(可选,默认见 {@link DEFAULT_ACP_RUN_TIMEOUTS})。 */
   timeouts?: AcpTimeouts
   /** 静默失败自动重试次数(默认 2:首次 + 1 次续跑)。 */
@@ -377,10 +379,16 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
     childSession: TurnSessionFace,
     turnStep: { turn: number; step: number },
   ): Promise<{ kind: 'skip' } | { kind: 'pump'; pump: TurnPump }> {
+    const admittedTools = this.options.admittedToolsOf?.(sessionId)
+      ?? (options.tools === undefined ? undefined : new Set(options.tools.map(tool => tool.name)))
     const existing = TurnPump.forSession(sessionId)
-    if (existing !== undefined) return { kind: 'pump', pump: existing }
+    if (existing !== undefined) {
+      existing.updateAdmittedTools(admittedTools)
+      return { kind: 'pump', pump: existing }
+    }
 
     const model = options.model ?? this.options.modelOf()
+    const bridgeMode = this.options.bridgeModeOf?.() ?? this.options.bridgeMode
     // 读图引导按工具在场情况变化(read_image 在场即原生;AGY 仅兜底)。
     const imageGuidance = this.imageGuidanceFor(model)
     const cwd = childSession.header.cwd ?? process.cwd()
@@ -411,14 +419,14 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       // system prompt 变了(或这个会话还从未发过):整份补发一次,模型由此拿到
       // 最新的 dsh 侧纪律(优先用 dsh_* 工具等)。
       if (system !== undefined && system.trim().length > 0 && record.systemHash !== systemHash) {
-        const block = systemInstructionsText(system, record.systemHash !== undefined, this.options.bridgeMode ?? 'delegate', imageGuidance)
+        const block = systemInstructionsText(system, record.systemHash !== undefined, bridgeMode ?? 'delegate', imageGuidance)
         prompt = `${block}\n\n${prompt}`
       }
       resume = { acpId: record.acpId }
     } else {
       // 新会话且带历史:把折叠后的历史转成 CodeBuddy 原生记录写成会话文件,
       // 以 session/load 载入——历史以原生消息进入,而不是压成一段提示词。
-      const seed = await this.buildNativeSeed(options, cwd, imageGuidance)
+      const seed = await this.buildNativeSeed(options, cwd, imageGuidance, bridgeMode)
       if (seed !== undefined) {
         try {
           writeConversationFile(seed.file, seed.records, { sessionId: seed.sessionId, cwd })
@@ -444,7 +452,8 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       command: this.options.command,
       prefixArgs: this.options.prefixArgs,
       extraArgs: this.options.extraArgs,
-      ...(this.options.bridgeMode === undefined ? {} : { bridgeMode: this.options.bridgeMode }),
+      bridgeMode,
+      admittedTools,
       ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
       ...this.options.timeouts === undefined ? {} : { timeouts: this.options.timeouts },
       ...this.options.maxAttempts === undefined ? {} : { maxAttempts: this.options.maxAttempts },
@@ -511,6 +520,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
     options: GenerateOptions,
     cwd: string,
     imageGuidance: ImageReadGuidance,
+    bridgeMode: 'mcp' | 'delegate' | undefined,
   ): Promise<{ sessionId: string; file: string; records: NativeRecord[] } | undefined> {
     if (options.messages.length <= 1) return undefined
     try {
@@ -529,7 +539,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
             },
         // dsh 的 system prompt 作为首条记录进 CLI 历史(对齐 dsh 原生行为)。
         options.system,
-        this.options.bridgeMode ?? 'delegate',
+        bridgeMode ?? 'delegate',
         imageGuidance,
       )
       if (records.length === 0) return undefined
@@ -581,6 +591,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
     state: { maxGapMs: number },
   ): AsyncIterable<StreamChunk> {
     const { command, prefixArgs } = this.options
+    const bridgeMode = this.options.bridgeModeOf?.() ?? this.options.bridgeMode
     // 请求级 model 优先(子代理可经 agentOptions.model 动态指定),回退到当前默认模型。
     const model = options.model ?? this.options.modelOf()
     // 读图引导按工具在场情况变化(旁路会话同样要带,哈希与种子都要用)。
@@ -604,7 +615,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
     let promptImages: Array<{ data: string; mimeType: string }> = []
     // 新会话且带历史:历史走原生会话文件(session/load)。
     let nativeSeed: { sessionId: string; file: string; records: NativeRecord[] } | undefined
-    if (!isResume && !purposeCall) nativeSeed = await this.buildNativeSeed(options, cwd, imageGuidance)
+    if (!isResume && !purposeCall) nativeSeed = await this.buildNativeSeed(options, cwd, imageGuidance, bridgeMode)
     if (record !== undefined) {
       const replay = await resumeReplayPrompt(
         this.ctx,
@@ -800,7 +811,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       syncCliIntegrations({ projectCwd: cwd })
       // 端点可能因 owner(先 apply 的插件)被卸载而消失:幂等补注册再生成配置,
       // 否则 CLI 以"内置工具全禁 + 无 --mcp-config"启动,该回合零工具且静默。
-      if (this.options.bridgeMode === 'mcp') registerDshMcpServer(this.ctx)
+      if (bridgeMode === 'mcp') registerDshMcpServer(this.ctx)
       const conn = new AcpConnection(
         [
           command,
@@ -810,8 +821,8 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
           model,
           ...effortArgs,
           '--dangerously-skip-permissions',
-          ...cliToolPolicyArgs(this.options.bridgeMode),
-          ...mcpConfigArgs(this.options.bridgeMode, dshSessionId),
+          ...cliToolPolicyArgs(bridgeMode),
+          ...mcpConfigArgs(bridgeMode, dshSessionId),
           ...this.options.extraArgs,
         ],
         cwd,
