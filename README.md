@@ -70,8 +70,8 @@
 从 `0.1.1` 迁移时，更新 CodeBuddy 插件后移除同一 profile 里的旧共享包 `@flg1217/dsh-mcp`。如果同一 profile 还有插件依赖旧包，请先迁移那些插件，避免新旧桥同时启用。
 
 ```bash
-dsh plugin --profile web add github:Elgalas/dsh-mcp-tool-server#947182d90a2188c80a4e0d096017142527ca9679
-dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#master
+dsh plugin --profile web add github:Elgalas/dsh-mcp-tool-server#babd2ebe170645afc194e38db80f84b1379e30ab
+dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#ff79013c77eeca184a8ce76376e9d716f859db93
 ```
 
 使用本地安装包时：
