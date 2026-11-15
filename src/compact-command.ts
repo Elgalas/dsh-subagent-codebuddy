@@ -37,6 +37,8 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ConversationStore } from './conversations.js'
+import { failureOfError, formatFailureLine } from './failure.js'
+import { mcpConfigArgs } from './mcp-config.js'
 import { TurnPump } from './pump.js'
 import { markSelfInitiatedCompaction } from './self-compaction.js'
 
@@ -125,6 +127,7 @@ export async function forwardCompactToCli(
     deps.modelOf(),
     '--dangerously-skip-permissions',
     ...cliToolPolicyArgs(),
+    ...mcpConfigArgs(),
     ...deps.extraArgs,
   ]
   // 压缩过程中的用量样本:CLI 的压缩 agent 会把整段历史读进去摘要,它的
@@ -136,12 +139,13 @@ export async function forwardCompactToCli(
     const tokens = sample.inputTokens + (sample.cacheReadTokens ?? 0)
     if (tokens > 0 && (contextBefore === undefined || tokens > contextBefore)) contextBefore = tokens
   }
-  const conn = new AcpConnection(argv, cwd, onUpdate)
+  let conn: AcpConnection | undefined
   const to = DEFAULT_ACP_RUN_TIMEOUTS
   // 发起时刻取在转发**之前**:CLI 可能在转发期间就给摘要打上时间戳,用结束时刻
   // 会把它误判成"本次之前漏看的那条"(见 self-compaction.ts 的判定说明)。
   const requestedAt = Date.now()
   try {
+    conn = new AcpConnection(argv, cwd, onUpdate)
     await conn.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
@@ -167,10 +171,10 @@ export async function forwardCompactToCli(
   } catch (error) {
     return {
       kind: 'error',
-      text: `压缩转发失败: ${error instanceof Error ? error.message : String(error)}`,
+      text: `压缩转发失败: ${formatFailureLine(failureOfError(error))}`,
     }
   } finally {
-    conn.kill()
+    conn?.kill()
   }
 }
 

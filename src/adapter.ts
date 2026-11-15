@@ -46,11 +46,11 @@ import { AcpConnection, DEFAULT_ACP_RUN_TIMEOUTS, cliToolPolicyArgs, isProgressU
 import { mcpConfigArgs } from './mcp-config.js'
 import { registerDshMcpServer } from '@flg1217/dsh-mcp-tool-server'
 import type { AcpPromptResult, AcpTimeouts, AcpUpdate } from './acp.js'
-import { failureOfError, formatFailureLine, isFailureOutcome, parseCodebuddyFailure } from './failure.js'
+import { failureOfError, formatFailureLine, isFailureOutcome, isMissingAcpSession, parseCodebuddyFailure } from './failure.js'
 import type { CodebuddyFailure } from './failure.js'
 import { TurnPump } from './pump.js'
 import { createModelPlan } from './model-plan.js'
-import { syncCliIntegrations } from './cli-integrations.js'
+import { syncSkillsToCodebuddy } from './cli-integrations.js'
 import type { ImageReadGuidance, PumpHost } from './pump.js'
 import { listCodebuddyModelIdsAsync } from './models.js'
 import { createModelCapabilityIndex } from './model-capabilities.js'
@@ -881,12 +881,8 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       const effortArgs = options.reasoningEffort === undefined
         ? []
         : ['--effort', String(options.reasoningEffort)]
-      // CLI 进程将在启动时读取 ~/.codebuddy/mcp.json 与 skills 目录:启动前
-      // 同步一次(dsh 的 MCP 配置 / skills → CLI 原生通道),保证最新。
-      syncCliIntegrations({ projectCwd: cwd })
-      // 端点可能因 owner(先 apply 的插件)被卸载而消失:幂等补注册再生成配置,
-      // 否则 CLI 以"内置工具全禁 + 无 --mcp-config"启动,该回合零工具且静默。
-      if (bridgeMode === 'mcp') registerDshMcpServer(this.ctx)
+      syncSkillsToCodebuddy({ projectCwd: cwd })
+      if (!purposeCall && bridgeMode === 'mcp') registerDshMcpServer(this.ctx)
       const conn = new AcpConnection(
         [
           command,
@@ -897,7 +893,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
           ...effortArgs,
           '--dangerously-skip-permissions',
           ...cliToolPolicyArgs(bridgeMode),
-          ...mcpConfigArgs(bridgeMode, dshSessionId),
+          ...mcpConfigArgs(bridgeMode, purposeCall ? undefined : dshSessionId),
           ...this.options.extraArgs,
         ],
         cwd,
@@ -906,7 +902,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       let exitError: Error | undefined
       conn.onExit(info => {
         if (conn.wasKilled || stallTimedOut) return
-        exitError = new Error(
+        exitError = info.error ?? new Error(
           `CodeBuddy ACP 进程退出(code ${info.code ?? 'null'}${info.signal !== null ? `,signal ${info.signal}` : ''})${conn.stderrNote()}`,
         )
         const w = wake
@@ -923,6 +919,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       }
       options.signal?.addEventListener('abort', onAbort, { once: true })
 
+      let openingSession = true
       try {
         await conn.request('initialize', {
           protocolVersion: 1,
@@ -934,7 +931,8 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
           try {
             await conn.request('session/load', { sessionId: record.acpId, cwd: acpCwd, mcpServers: [] })
             acpSessionId = record.acpId
-          } catch {
+          } catch (error) {
+            if (!isMissingAcpSession(error)) throw error
             // CodeBuddy 侧会话存储丢失:回退新会话 + 完整历史重发。
             this.conversations.delete(dshSessionId)
             const full = await buildPrompt(this.ctx, options)
@@ -945,12 +943,15 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
           }
         } else if (nativeSeed !== undefined) {
           // 原生种子:写会话文件 + session/load(历史以原生消息进入)。
+          let seedWritten = false
           try {
             writeConversationFile(nativeSeed.file, nativeSeed.records, { sessionId: nativeSeed.sessionId, cwd })
+            seedWritten = true
             await conn.request('session/load', { sessionId: nativeSeed.sessionId, cwd: acpCwd, mcpServers: [] })
             acpSessionId = nativeSeed.sessionId
-          } catch {
-            // 合成文件未被接受(未来版本变更等):退回新会话 + 全量提示词。
+          } catch (error) {
+            if (seedWritten && !isMissingAcpSession(error)) throw error
+            // 合成文件无法写入或找不到:退回新会话 + 全量提示词。
             const full = await buildPrompt(this.ctx, options)
             prompt = full.prompt
             promptImages = full.images
@@ -975,6 +976,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
             ...(hash === undefined ? {} : { systemHash: hash }),
           })
         }
+        openingSession = false
         capturing = false
 
         // ── prompt:消费 update 直到在飞 prompt 结束 ───────────────────────
@@ -1077,6 +1079,11 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
             ? { kind: 'max-tokens' }
             : { kind: 'stop' },
         }
+      } catch (error) {
+        if (!openingSession) throw error
+        // 进程异常退出保持显式终止；spawn 错误由分类器给出配置提示。
+        if (exitError !== undefined && exitError !== error) throw exitError
+        throwFailure('CodeBuddy ACP 握手失败:', failureOfError(error), conn.stderrNote())
       } finally {
         clearInterval(guardTimer)
         if (killTimer !== undefined) clearTimeout(killTimer)

@@ -1,7 +1,7 @@
 {
-  "name": "@flg1217/dsh-subagent-codebuddy",
+  "name": "@elgalas/dsh-subagent-codebuddy",
   "version": "0.1.3",
-  "description": "CodeBuddy CLI (Tencent) as a dsh LLM provider via ACP: selectable as a main-agent model (the ACP CLI owns the turn and its tools) and as a subagent backend through the generic subagent tool; exposes the CLI model catalog via listModels().",
+  "description": "CodeBuddy CLI plugin for DeepSeek Harness (DSH) with main-agent models, subagent delegation, and a DSH-managed MCP tool bridge.",
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/types/index.d.ts",
@@ -63,8 +63,9 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/flg1217/dsh-subagent-codebuddy.git"
+    "url": "https://github.com/Elgalas/dsh-subagent-codebuddy.git"
   },
+  "homepage": "https://github.com/Elgalas/dsh-subagent-codebuddy#readme",
   "keywords": [
     "dsh",
     "dsh-plugin",

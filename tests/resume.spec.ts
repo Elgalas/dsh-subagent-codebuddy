@@ -64,7 +64,7 @@ interface Harness {
 function makeHarness(
   store: ConversationStore,
   sessionId = 's1',
-  failLoad = false,
+  failLoad: boolean | 'auth' = false,
   nativeBaseDir?: string,
   failPrompt = false,
   closedStep = false,
@@ -107,7 +107,8 @@ function makeHarness(
       } else if (request.method === 'session/new') {
         p.respond(request.id, { sessionId: 'cb-1' })
       } else if (request.method === 'session/load') {
-        if (failLoad) p.respondError(request.id, { code: -1, message: 'session not found' })
+        if (failLoad === 'auth') p.respondError(request.id, { code: -32000, message: 'Authentication required', data: { category: 'auth' } })
+        else if (failLoad) p.respondError(request.id, { code: -32000, message: 'No conversation found with session ID: cb-1' })
         else p.respond(request.id, {})
       } else if (request.method === 'session/prompt') {
         if (failPrompt) {
@@ -330,6 +331,17 @@ describe('跨重启恢复', () => {
     const prompt = second.prompts.at(-1)!
     expect(prompt).toContain('问题一')
     expect(prompt).toContain('问题二')
+  })
+
+  it.each([false, true])('session/load 认证失败保留续接映射 (closedStep=%s)', async closedStep => {
+    const store = new ConversationStore(null)
+    const previous = { acpId: 'cb-1', sentCount: 1, lastSentMessageId: 'u1' }
+    store.set('s1', previous)
+    const saved = store.get('s1')
+    const { adapter, requests } = makeHarness(store, 's1', 'auth', undefined, false, closedStep)
+    await drain(adapter, options([msg('u1', 'user', '问题一'), msg('u2', 'user', '问题二')]))
+    expect(requests()).toEqual(['initialize', 'session/load'])
+    expect(store.get('s1')).toEqual(saved)
   })
 
   it('锚点被压缩移除(历史收缩):只发最后一条用户输入兜底,不整体重发', async () => {

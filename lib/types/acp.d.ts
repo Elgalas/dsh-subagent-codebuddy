@@ -194,6 +194,7 @@ export declare class AcpRpcError extends Error {
 export interface AcpExitInfo {
     code: number | null;
     signal: string | null;
+    error?: Error;
 }
 /** 从 update 提取 CodeBuddy 私有工具名,并归一化为 dsh 工具名
  * (Read→read、TodoWrite→todo_write、WebSearch→web_search),
@@ -240,6 +241,7 @@ export declare class AcpConnection {
     /** close 原因:正常退出 / 被主动 kill(避免把自杀报成崩溃)。 */
     private killed;
     constructor(argvPrefix: readonly string[], cwd: string, onUpdate: (update: AcpUpdate) => void, onClientRequest?: AcpClientRequestHandler | undefined);
+    private complete;
     /** 进程退出(含退出码);已在退出后调用则立即返回。 */
     onExit(listener: (info: AcpExitInfo) => void): void;
     /**

@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process'
 import { asSpawnResult, autoHandshake, fakeAcpProc, message } from './fake-acp.ts'
 import { makeRecordingAdapter } from './recording-fixture.ts'
 import type { RecordedEvent } from './recording-fixture.ts'
+import { AcpConnection } from '../src/acp.ts'
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>()
@@ -34,12 +35,17 @@ interface FinishChunk {
   reason?: { kind?: string; failure?: { message?: string; code?: string } }
 }
 
-async function drainFail(adapter: ReturnType<typeof makeRecordingAdapter>['adapter'], sessionId: string): Promise<FinishChunk[]> {
+async function drainFail(
+  adapter: ReturnType<typeof makeRecordingAdapter>['adapter'],
+  sessionId: string,
+  purpose?: 'title',
+): Promise<FinishChunk[]> {
   const chunks: FinishChunk[] = []
   for await (const chunk of adapter.stream({
     model: 'glm-5.3',
     provider: 'codebuddy',
     sessionId,
+    purpose,
     messages: [{ role: 'user', content: [{ type: 'text', text: '任务' }] }],
   } as never)) {
     chunks.push(chunk as never)
@@ -48,6 +54,59 @@ async function drainFail(adapter: ReturnType<typeof makeRecordingAdapter>['adapt
 }
 
 describe('adapter(ACP):失败原因透出', () => {
+  it('子进程 error 与 close 只结算一次，未决和后续请求都收到原错误', async () => {
+    const p = fakeAcpProc()
+    mockedSpawn.mockReturnValue(asSpawnResult(p))
+    const conn = new AcpConnection(['missing-cli'], process.cwd(), () => {})
+    const listener = vi.fn()
+    conn.onExit(listener)
+    const pending = conn.request('initialize', {}, 0)
+    const error = Object.assign(new Error('spawn missing-cli ENOENT'), { code: 'ENOENT', syscall: 'spawn missing-cli' })
+    conn.proc.emit('error', error)
+    conn.proc.emit('close', -2, null)
+    await expect(pending).rejects.toBe(error)
+    await expect(conn.request('session/new', {}, 0)).rejects.toBe(error)
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(listener).toHaveBeenCalledWith({ code: null, signal: null, error })
+  })
+
+  it('CLI 不存在时回合报告 command 错误，且不重试', async () => {
+    mockedSpawn.mockImplementation(() => {
+      const proc = asSpawnResult(fakeAcpProc())
+      const error = Object.assign(new Error('spawn missing-cli ENOENT'), { code: 'ENOENT', syscall: 'spawn missing-cli' })
+      queueMicrotask(() => proc.emit('error', error))
+      return proc
+    })
+    const { adapter } = makeRecordingAdapter({ maxAttempts: 2, retryDelayMs: 10 })
+    const chunks = await drainFail(adapter, 's-missing-cli')
+    const finish = chunks.at(-1)?.reason
+    expect(finish?.kind).toBe('error')
+    expect(finish?.failure?.message).toContain('command')
+    expect(finish?.failure?.message).toContain('ENOENT')
+    expect(mockedSpawn).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([undefined, 'title'] as const)('session/new 未登录只启动一次 (purpose=%s)', async purpose => {
+    mockedSpawn.mockImplementation(() => {
+      const p = fakeAcpProc()
+      p.onRequest(msg => {
+        if (msg.method === 'initialize') p.respond(msg.id, { protocolVersion: 1 })
+        if (msg.method === 'session/new') p.respondError(msg.id, { code: -32000, message: 'Authentication required' })
+      })
+      return asSpawnResult(p)
+    })
+    const { adapter } = makeRecordingAdapter({ maxAttempts: 2, retryDelayMs: 10 })
+    const chunks = await drainFail(adapter, 's-auth-handshake', purpose)
+    const finish = chunks.at(-1)?.reason
+    expect(finish?.kind).toBe('error')
+    expect(finish?.failure?.message).toContain('运行 codebuddy 登录')
+    expect(finish?.failure?.message).toContain('category=auth')
+    expect(mockedSpawn).toHaveBeenCalledTimes(1)
+    expect(mockedSpawn.mock.calls[0]?.[1]).toEqual(expect.arrayContaining([
+      '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+    ]))
+  })
+
   it('配额限流(refusal + _meta errorMessage)→ 不重试,finish error 显示限流原因与证据', async () => {
     mockedSpawn.mockImplementation(() => {
       const p = fakeAcpProc()

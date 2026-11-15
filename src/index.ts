@@ -23,7 +23,7 @@ import { CodebuddyLlmAdapter } from './adapter.js'
 import { ConversationStore } from './conversations.js'
 import { mountCompactCommand, registerCompactDelegation } from './compact-command.js'
 import { registerCompactMirror } from './compact-mirror.js'
-import { syncCliIntegrations } from './cli-integrations.js'
+import { syncSkillsToCodebuddy } from './cli-integrations.js'
 import { registerSubagentTool } from './subagent-tool.js'
 import { registerCodebuddyModelsTool } from './models.js'
 import { registerCodebuddySettings, resolveSpawnableCommand } from './settings.js'
@@ -160,6 +160,9 @@ export const Config: z<CodebuddyConfigInput, Config> = z.object({
 })
 
 export function apply(ctx: Context, config: Config): void {
+  if (config.extraArgs.some(arg => arg === '--mcp-config' || arg.startsWith('--mcp-config='))) {
+    throw new Error('CodeBuddy 插件管理 ACP 会话的 MCP 配置，请从 extraArgs 移除 --mcp-config')
+  }
   const providerName = config.providerName
   const toolName = config.toolName
 
@@ -169,9 +172,8 @@ export function apply(ctx: Context, config: Config): void {
     child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
   })
 
-  // 装载时先同步一次 dsh→CodeBuddy 的原生接入(MCP 配置 / skills 目录);
-  // 每个 CodeBuddy 进程启动前(pump/adapter)还会再同步,保证读到最新。
-  syncCliIntegrations()
+  // 装载时同步用户 skills，回合启动前再接入项目 skills。
+  syncSkillsToCodebuddy()
 
   // dsh MCP server(共享包 @flg1217/dsh-mcp-tool-server):把会话可见的 dsh 工具以 MCP
   // 暴露给 CLI(bridgeMode=mcp 时 spawn 以 --mcp-config 连接)。注册幂等:

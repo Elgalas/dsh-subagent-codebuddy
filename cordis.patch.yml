@@ -1,4 +1,4 @@
-# @flg1217/dsh-subagent-codebuddy bundle patch: inserts the subagent-codebuddy
+# @elgalas/dsh-subagent-codebuddy bundle patch: inserts the subagent-codebuddy
 # plugin row with shipped defaults. Applied automatically when the profile
 # loads this bundle; override any field from the profile patch layer.
 #
@@ -9,7 +9,7 @@
 #       model: <其他模型>
 - insert:
     - id: subagent-codebuddy
-      name: '@flg1217/dsh-subagent-codebuddy'
+      name: '@elgalas/dsh-subagent-codebuddy'
       config:
         command: codebuddy
         model: deepseek-v4-flash

@@ -1,9 +1,7 @@
 # dsh-subagent-codebuddy
 
-> **CodeBuddy Code CLI 模型提供方 — DeepSeek Harness (dsh) 插件**
-> 把腾讯 CodeBuddy CLI 以 ACP (Agent Client Protocol) 接入 dsh，注册为 `codebuddy` LLM provider：
-> 主代理可直接在模型选择器选用 CodeBuddy 模型，通用 `subagent` 工具也可委派 CodeBuddy 子代理。
-> 完全遵循 dsh 官方扩展机制，零源码改动。
+DeepSeek Harness（DSH）的 CodeBuddy CLI 插件，包名为 `@elgalas/dsh-subagent-codebuddy`。
+它通过 ACP 接入 CodeBuddy，主代理可以在模型选择器里直接使用 CodeBuddy 模型，也可以用 DSH 的 `subagent` 工具委派任务。桥接工具由 DSH 按当前会话的权限执行。
 
 ## 0.1.3 更新要点
 
@@ -59,7 +57,7 @@
 ### 系统要求
 
 - 此版本在 dsh `0.2.2-rc.3` 上验证，专用子代理工具使用新版 `startActivation` 接口。
-- CodeBuddy CLI 已安装并登录（子进程继承登录态）
+- CodeBuddy CLI 已安装并登录（子进程继承登录态）。CLI 需要支持 `--strict-mcp-config`，已在 `2.184.0` 验证该参数。
 - 需运行在**带 `webServer` 服务的 profile**（如 `web`）：`bridgeMode: mcp` 依赖它挂
   MCP 端点；拿不到该服务时端点不注册，`--mcp-config` 不注入（不会报错，但工具桥不可用）
 
@@ -69,16 +67,18 @@
 
 从 `0.1.1` 迁移时，更新 CodeBuddy 插件后移除同一 profile 里的旧共享包 `@flg1217/dsh-mcp`。如果同一 profile 还有插件依赖旧包，请先迁移那些插件，避免新旧桥同时启用。
 
+如果同一 profile 已安装更名前的 CodeBuddy 插件，先在「插件」页卸载旧包，再安装新包。新包沿用 `subagent-codebuddy` 配置条目 ID。
+
 ```bash
 dsh plugin --profile web add github:Elgalas/dsh-mcp-tool-server#babd2ebe170645afc194e38db80f84b1379e30ab
-dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#ff79013c77eeca184a8ce76376e9d716f859db93
+dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy
 ```
 
 使用本地安装包时：
 
 ```bash
 dsh plugin --profile web add ./flg1217-dsh-mcp-tool-server-0.1.3.tgz
-dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.3.tgz
+dsh plugin --profile web add ./elgalas-dsh-subagent-codebuddy-0.1.3.tgz
 ```
 
 从源码目录安装时，pnpm 可能创建本地链接，导致插件从源码目录解析依赖，找不到装在 profile 里的共享包。更新现有的链接安装时，先从该 profile 移除旧的 CodeBuddy 插件，再安装打包产物。
@@ -145,7 +145,7 @@ dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.3.tgz
 | `models` | `[]` | 模型优先顺序（首位即默认）。配额失败时按此顺序自动降级，见 §二「模型优先顺序与配额降级」 |
 | `defaultEffort` | `""` | 子代理默认思考强度（`""` = 不传 `--effort`）；可选值随目录，常见 `low/medium/high/xhigh/max` |
 | `fallbackOnQuota` | `true` | 配额/限流（429）且本回合零产出时，自动换到 `models` 里的下一个模型并重开 CodeBuddy 会话 |
-| `extraArgs` | `[]` | 追加的 CodeBuddy 参数 |
+| `extraArgs` | `[]` | 追加的 CodeBuddy 参数。`--mcp-config` 由插件管理 |
 | `providerName` | `codebuddy` | LLM provider 路由名 |
 | `toolName` | `subagent_codebuddy` | opt-in 工具名 |
 | `registerSubagentTools` | `false` | 是否注册 opt-in 委派工具（推荐用通用 `subagent`） |
@@ -184,6 +184,10 @@ CLI 内置工具只放行 `Read`（`--tools Read`，读图通道，见 §一「�
 MCP 端点的安全约束：**仅 loopback 来源 + URL 携带每进程随机 key**（双重校验），挂在 dsh
 自带 webserver 上（与 Web UI 同端口），不额外开监听；`tools/call` 另按 `tools/list` 的同一份
 工具面校验可见性。会话专属配置写在系统临时目录，权限 `0600`，超龄自动清扫。
+
+插件用 `--strict-mcp-config` 隔离 CodeBuddy 的 MCP 配置。对话只加载本会话的 DSH 工具桥，
+delegate 模式和辅助调用使用空 MCP 配置。DSH 的 MCP 工具通过桥接按会话可见性暴露，
+独立运行 `codebuddy` 时仍使用自己的配置，包括以前同步到 `~/.codebuddy/mcp.json` 的条目。
 
 **客户端放弃后的结果补投（交互式工具的关键路径）**：CLI 侧一旦按超时/断连放弃一次
 `tools/call`，它的模型就永远看不到结果，而 dsh 侧**不会**因此中止已经注入 loop 的调用。
@@ -297,6 +301,8 @@ pnpm typecheck      # tsc --noEmit
 4. `git status` 无遗留文件；
 5. `git add -A && git commit -m "..." && git push origin master`。
 
-## 五、许可证
+## 五、来源与许可证
 
-MIT
+本项目由 Elgalas 维护，fork 自 [flg1217/dsh-subagent-codebuddy](https://github.com/flg1217/dsh-subagent-codebuddy)。感谢 flg1217 的原始实现与贡献。
+
+采用 [MIT 许可证](LICENSE)。

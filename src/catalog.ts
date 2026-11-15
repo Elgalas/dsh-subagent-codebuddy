@@ -17,7 +17,7 @@
  *    (`imageDefaultFor` 同款语义,见 dsh-connect-workbuddy 的
  *    src/native-modality.ts)。宁可漏标,不可把纯文本模型标成多模态。
  *
- * @module @flg1217/dsh-subagent-codebuddy/catalog
+ * @module @elgalas/dsh-subagent-codebuddy/catalog
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'

@@ -51,6 +51,8 @@ export declare function parseCodebuddyFailure(raw: string | undefined, rpcCode?:
  * @returns 分类结果(普通异常归 unknown,原文进 detail)。
  */
 export declare function failureOfError(error: unknown): CodebuddyFailure;
+/** 只在 ACP 明确报告会话不存在时释放续接映射。 */
+export declare function isMissingAcpSession(error: unknown): boolean;
 /**
  * 组装一行中断原因:`分类原因——原始消息(category=…;httpStatus=…;bizCode=…)`。
  * @param failure - 分类结果。

@@ -41,7 +41,7 @@ import { foldPendingInsertions } from './inbox.js'
 import type { PendingInsertion } from './inbox.js'
 import { todoToolKind } from './todo-bridge.js'
 import type { TodoListState } from './todo-bridge.js'
-import { failureOfError, formatFailureLine, isFailureOutcome, parseCodebuddyFailure } from './failure.js'
+import { failureOfError, formatFailureLine, isFailureOutcome, isMissingAcpSession, parseCodebuddyFailure } from './failure.js'
 import { toolResultBlocksFromText } from './tool-image.js'
 import type { AttachmentsSaveFace } from './tool-image.js'
 import { announceDelegateTools, DELEGATE_TOOL_METHOD } from './delegate.js'
@@ -58,7 +58,7 @@ import {
   registerMcpLoopDispatcher,
 } from '@flg1217/dsh-mcp-tool-server'
 import type { DshSurfaceTool, DshToolRunResult } from '@flg1217/dsh-mcp-tool-server'
-import { syncCliIntegrations } from './cli-integrations.js'
+import { syncSkillsToCodebuddy } from './cli-integrations.js'
 import { steerDebug } from './steer-debug.js'
 import { mcpConfigArgs } from './mcp-config.js'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -843,46 +843,38 @@ export class TurnPump {
     this.lastIdlePhaseAt = undefined
     this.lastToolExecutingAt = 0
 
-    // 参数与旧实现逐字一致(实测过的组合):`--dangerously-skip-permissions`
-    // 而非 `--permission-mode`——后者虽是配置项,但从未在此路径生效,不顺手改
-    // 行为(改权限参数等于换一套 CLI 行为,需要单独实测)。
-    // 端点可能因 owner(先 apply 的插件)被卸载而消失:幂等补注册再生成配置,
-    // 否则 mcpConfigArgs 拿不到 URL → CLI 以"内置工具全禁 + 无 --mcp-config"
-    // 启动,该回合零工具且完全静默。
-    if (this.bridgeMode === 'mcp') registerDshMcpServer(this.deps.ctx)
-    // 模型每次 attempt 重读:配额降级换模型后,重启要带新 `--model`。
-    this.model = this.deps.modelOf?.() ?? this.deps.model
-    const argv = [
-      this.deps.command,
-      ...this.deps.prefixArgs,
-      '--acp',
-      '--model',
-      this.model,
-      ...this.deps.reasoningEffort === undefined ? [] : ['--effort', this.deps.reasoningEffort],
-      '--dangerously-skip-permissions',
-      ...cliToolPolicyArgs(this.bridgeMode, isPtcOnlySurface(this.toolSurface)),
-      ...mcpConfigArgs(this.bridgeMode, this.deps.dshSessionId),
-      ...this.deps.extraArgs,
-    ]
-    // CLI 进程将在启动时读取 ~/.codebuddy/mcp.json 与 skills 目录:每次
-    // 启动前同步一次(dsh 的 MCP 配置 / skills → CLI 原生通道),保证最新。
-    syncCliIntegrations({ projectCwd: this.deps.cwd })
-    const conn = new AcpConnection(
-      argv,
-      this.deps.cwd,
-      update => this.onUpdate(update),
-      request => this.handleClientRequest(request),
-    )
-    this.conn = conn
-    conn.onExit(info => {
-      if (conn.wasKilled || this.stallTimedOut || this.disposed) return
-      // 进程退出沿用旧语义:不可续跑(重试会重复已完成部分),显式中止。
-      this.failRun(new Error(
-        `CodeBuddy ACP 进程退出(code ${info.code ?? 'null'}${info.signal !== null ? `,signal ${info.signal}` : ''})${conn.stderrNote()}`,
-      ), false)
-    })
-
     try {
+      // 端点可能随共享包卸载，启动时幂等补注册。配额降级的下一次启动重读模型。
+      if (this.bridgeMode === 'mcp') registerDshMcpServer(this.deps.ctx)
+      this.model = this.deps.modelOf?.() ?? this.deps.model
+      const argv = [
+        this.deps.command,
+        ...this.deps.prefixArgs,
+        '--acp',
+        '--model',
+        this.model,
+        ...this.deps.reasoningEffort === undefined ? [] : ['--effort', this.deps.reasoningEffort],
+        '--dangerously-skip-permissions',
+        ...cliToolPolicyArgs(this.bridgeMode, isPtcOnlySurface(this.toolSurface)),
+        ...mcpConfigArgs(this.bridgeMode, this.deps.dshSessionId),
+        ...this.deps.extraArgs,
+      ]
+      syncSkillsToCodebuddy({ projectCwd: this.deps.cwd })
+      const conn = new AcpConnection(
+        argv,
+        this.deps.cwd,
+        update => this.onUpdate(update),
+        request => this.handleClientRequest(request),
+      )
+      this.conn = conn
+      conn.onExit(info => {
+        if (conn.wasKilled || this.stallTimedOut || this.disposed) return
+        const reason = info.error === undefined
+          ? `CodeBuddy ACP 进程退出(code ${info.code ?? 'null'}${info.signal !== null ? `,signal ${info.signal}` : ''})`
+          : formatFailureLine(failureOfError(info.error))
+        this.failRun(new Error(`${reason}${conn.stderrNote()}`), false)
+      })
+
       await conn.request('initialize', {
         protocolVersion: 1,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
@@ -892,7 +884,8 @@ export class TurnPump {
         try {
           await conn.request('session/load', { sessionId: this.deps.resume.acpId, cwd: this.deps.acpCwd, mcpServers: [] })
           this.acpSessionId = this.deps.resume.acpId
-        } catch {
+        } catch (error) {
+          if (!isMissingAcpSession(error)) throw error
           // CodeBuddy 侧会话存储丢失:回退新会话 + 完整历史重发。
           this.deps.forgetConversation()
           this.deps.resume = undefined
@@ -967,7 +960,12 @@ export class TurnPump {
       this.armProgress()
     } catch (error) {
       if (this.aborted || this.disposed) return
-      this.failRun(error instanceof Error ? error : new Error(String(error)))
+      const failure = failureOfError(error)
+      this.failureCategory = failure.category
+      this.failRun(
+        new Error(`CodeBuddy ACP 握手失败:${formatFailureLine(failure, this.conn?.stderrNote())}`),
+        failure.retryable,
+      )
     }
   }
 

@@ -23,14 +23,13 @@ export declare function sweepStaleMcpConfigs(dir?: string, maxAgeMs?: number): n
 /**
  * 生成会话专属的 `--mcp-config` 文件并返回其路径。
  * @param dshSessionId - 会话 id(URL 携带,端侧据此解析 per-agent 工具集)。
- * @returns 配置文件路径;端点未就绪时 undefined(调用方跳过该参数)。
+ * @returns 配置文件路径;端点未就绪或写入失败时返回 undefined。
  */
 export declare function writeDshMcpConfigFile(dshSessionId: string): string | undefined;
 /**
- * spawn 参数:bridgeMode **显式等于 `mcp`** 时生成会话专属 MCP 配置并返回
- * `--mcp-config` 参数。
+ * 插件启动的 CLI 只加载显式传入的 MCP 配置。
  * @param bridgeMode - 桥接模式(undefined 与 delegate 同义:不注入)。
  * @param dshSessionId - 会话 id(MCP URL 携带,端侧据此解析 per-agent 工具集)。
- * @returns 追加到 CLI argv 的参数(空数组表示不启用 MCP 通道)。
+ * @returns 严格 MCP 启动参数。会话工具桥不可用时传空配置。
  */
-export declare function mcpConfigArgs(bridgeMode: 'mcp' | 'delegate' | undefined, dshSessionId: string | undefined): string[];
+export declare function mcpConfigArgs(bridgeMode?: 'mcp' | 'delegate', dshSessionId?: string): string[];

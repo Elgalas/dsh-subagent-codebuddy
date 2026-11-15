@@ -5,9 +5,9 @@
 // 检测/测试走 api.llm.discoverModels({settingsNs:'codebuddy', provider:'status'|'test'}),
 // 服务端直接 spawn codebuddy CLI,不落会话。
 window.__ModuleLoader__.load({
-  id: '@flg1217/dsh-subagent-codebuddy',
+  id: '@elgalas/dsh-subagent-codebuddy',
   factory: (require) => {
-    const NS_PACKAGE = '@flg1217/dsh-subagent-codebuddy'
+    const NS_PACKAGE = '@elgalas/dsh-subagent-codebuddy'
     const module = { exports: {} }
     const exports = module.exports
     const react = require('react')
@@ -119,10 +119,10 @@ window.__ModuleLoader__.load({
       chipOn: '.dshCb_chipOn{appearance:none;font:inherit;font-size:12px;line-height:18px;padding:3px 10px;border-radius:999px;cursor:pointer;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-module-platform);border:1px solid var(--dsw-alias-brand-primary)}',
     }
     const cssText = Object.values(CSS).join('')
-    const tagId = '@flg1217/codebuddy/plugin-card.css'
+    const tagId = `${NS_PACKAGE}/plugin-card.css`
     if (typeof document !== 'undefined' && document.querySelector(`style[data-plugin-css=${JSON.stringify(tagId)}]`) === null) {
       const tag = document.createElement('style')
-      tag.dataset.plugin = '@flg1217/codebuddy'
+      tag.dataset.plugin = NS_PACKAGE
       tag.dataset.pluginCss = tagId
       tag.textContent = cssText
       document.head.appendChild(tag)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Build @flg1217/dsh-subagent-codebuddy:
+ * Build @elgalas/dsh-subagent-codebuddy:
  *  1. tsc 编译服务端 src/*.ts → lib/*.js + lib/types/*.d.ts（ESM, bundler resolution）
  *  2. 拷贝客户端 src/client/index.js → lib/client.js + lib/types/client/index.d.ts
  *     （ModuleLoader bundle,浏览器端由 dsh client-modules 直接托管,无需打包）

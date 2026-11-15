@@ -219,6 +219,7 @@ export class AcpRpcError extends Error {
 export interface AcpExitInfo {
   code: number | null
   signal: string | null
+  error?: Error
 }
 
 /** 工具名在 _meta 私有扩展里的键。 */
@@ -379,13 +380,17 @@ export class AcpConnection {
     // 会升级为 uncaughtException 拖垮整个 dsh 服务;这里吞掉(写入由调用方
     // 的 try/catch 与 request 超时兜底)。
     this.proc.stdin?.on('error', () => { /* 进程已退出:忽略写入错误 */ })
-    this.proc.on('close', (code, signal) => {
-      this.exitInfo = { code, signal: signal ?? null }
-      // 进程退出时 reject 所有未决请求,避免悬挂到超时。
-      for (const p of [...this.pending.values()]) p.reject(new Error('ACP 进程已退出'))
-      this.pending.clear()
-      for (const w of this.exitWaiters.splice(0)) w(this.exitInfo)
-    })
+    this.proc.on('error', error => this.complete({ code: null, signal: null, error }))
+    this.proc.on('close', (code, signal) => this.complete({ code, signal: signal ?? null }))
+  }
+
+  private complete(info: AcpExitInfo): void {
+    if (this.exitInfo !== undefined) return
+    this.exitInfo = info
+    const error = info.error ?? new Error('ACP 进程已退出')
+    for (const request of this.pending.values()) request.reject(error)
+    this.pending.clear()
+    for (const listener of this.exitWaiters.splice(0)) listener(info)
   }
 
   /** 进程退出(含退出码);已在退出后调用则立即返回。 */
@@ -402,6 +407,9 @@ export class AcpConnection {
    * (实测:默认 180s 把 3 分钟以上的子代理任务全部掐死)。
    */
   request<T>(method: string, params: Record<string, unknown>, timeoutMs = 180_000): Promise<T> {
+    if (this.exitInfo !== undefined) {
+      return Promise.reject(this.exitInfo.error ?? new Error('ACP 进程已退出'))
+    }
     const id = this.nextId++
     return new Promise<T>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined

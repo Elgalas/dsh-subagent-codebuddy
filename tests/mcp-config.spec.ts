@@ -34,23 +34,28 @@ function makeCtx(): Context {
 }
 
 describe('--mcp-config 文件(CodeBuddy 方言)', () => {
-  it('URL 带 session/key、工具直连(defer_loading:false);delegate/undefined 不生成', () => {
+  it('严格模式仅传入会话专属端点，URL 带 session/key 且工具直连', () => {
     // 自建端点:不依赖前序用例残留的模块级 endpoint。
     disposeServer = registerDshMcpServer(makeCtx())
     const args = mcpConfigArgs('mcp', 'sess-x')
-    expect(args[0]).toBe('--mcp-config')
-    const server = (JSON.parse(readFileSync(args[1]!, 'utf8')) as {
+    expect(args.slice(0, 2)).toEqual(['--strict-mcp-config', '--mcp-config'])
+    const config = JSON.parse(readFileSync(args[2]!, 'utf8')) as {
       mcpServers: { dsh: { type: string; url: string; defer_loading?: boolean } }
-    }).mcpServers.dsh
+    }
+    expect(Object.keys(config.mcpServers)).toEqual(['dsh'])
+    const server = config.mcpServers.dsh
     // 全部工具直接展开(显式 false,防止被 CLI 全局 defer 开关覆盖成延迟加载)。
     expect(server.defer_loading).toBe(false)
     const url = new URL(server.url)
     expect(url.searchParams.get('session')).toBe('sess-x')
     expect((url.searchParams.get('key') ?? '').length).toBeGreaterThan(10)
-    expect(mcpConfigArgs('delegate', 'sess-x')).toEqual([])
-    // undefined 与 delegate 同义(低层缺省统一按 delegate,防混合态)。
-    expect(mcpConfigArgs(undefined, 'sess-x')).toEqual([])
-    expect(mcpConfigArgs('mcp', undefined)).toEqual([])
+  })
+
+  it('delegate、辅助调用或端点不可用时仍显式传入严格空配置', () => {
+    const empty = ['--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']
+    expect(mcpConfigArgs('delegate', 'sess-x')).toEqual(empty)
+    expect(mcpConfigArgs()).toEqual(empty)
+    expect(mcpConfigArgs('mcp', 'sess-no-endpoint')).toEqual(empty)
   })
 
   it('sweepStaleMcpConfigs:只删超龄的 mcp- 文件,不动新文件与其他文件', () => {
