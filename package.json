@@ -50,7 +50,7 @@
     "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
     "@deepseek-ai/dsh-util-values": "0.2.2-rc.3",
     "@deepseek-ai/schemastery": "^3.0.0",
-    "@flg1217/dsh-mcp-tool-server": "git+https://github.com/Elgalas/dsh-mcp-tool-server.git#babd2ebe170645afc194e38db80f84b1379e30ab",
+    "@elgalas/dsh-mcp-tool-server": "git+https://github.com/Elgalas/dsh-mcp-tool-server.git#a971a66bd5d590ac0b19d5f4dfae08c827ed2941",
     "@types/node": "^22.0.0",
     "typescript": "~5.7.2",
     "vitest": "^3.0.5"
@@ -84,6 +84,6 @@
     "@deepseek-ai/dsh-subagent": "^0.2.1-alpha.2",
     "@deepseek-ai/dsh-tools": "^0.2.1-alpha.2",
     "@deepseek-ai/schemastery": "^3.0.0",
-    "@flg1217/dsh-mcp-tool-server": "^0.1.3"
+    "@elgalas/dsh-mcp-tool-server": "^0.1.3"
   }
 }

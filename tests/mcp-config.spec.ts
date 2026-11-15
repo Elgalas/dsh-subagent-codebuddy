@@ -1,7 +1,7 @@
 /**
  * CodeBuddy 方言测试:`--mcp-config` 文件生成与陈旧文件清扫。
  *
- * 通用面(端点、工具执行、断连补投)在共享包 @flg1217/dsh-mcp-tool-server 的
+ * 通用面(端点、工具执行、断连补投)在共享包 @elgalas/dsh-mcp-tool-server 的
  * tests/mcp-server.spec.ts;这里只测本插件保留的落盘形态。
  */
 import { mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import { registerDshMcpServer } from '@flg1217/dsh-mcp-tool-server'
+import { registerDshMcpServer } from '@elgalas/dsh-mcp-tool-server'
 import { mcpConfigArgs, sweepStaleMcpConfigs } from '../src/mcp-config.ts'
 
 let disposeServer: (() => void) | undefined

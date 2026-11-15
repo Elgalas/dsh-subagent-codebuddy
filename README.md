@@ -63,21 +63,19 @@ DeepSeek Harness（DSH）的 CodeBuddy CLI 插件，包名为 `@elgalas/dsh-suba
 
 ### 安装插件
 
-`@flg1217/dsh-mcp-tool-server` 由宿主 profile 提供。使用包含 dsh 0.2.2 工具准入修复的共享包 `0.1.3`。先安装共享包，再把 CodeBuddy 插件装入同一个 profile。用桌面版时，在「插件」页面按此顺序添加两个 GitHub 来源。
+`@elgalas/dsh-mcp-tool-server` 由宿主 profile 提供。使用包含 dsh 0.2.2 工具准入修复的共享包 `0.1.3`。先安装共享包，再把 CodeBuddy 插件装入同一个 profile。用桌面版时，在「插件」页面按此顺序添加两个 GitHub 来源。
 
-从 `0.1.1` 迁移时，更新 CodeBuddy 插件后移除同一 profile 里的旧共享包 `@flg1217/dsh-mcp`。如果同一 profile 还有插件依赖旧包，请先迁移那些插件，避免新旧桥同时启用。
-
-如果同一 profile 已安装更名前的 CodeBuddy 插件，先在「插件」页卸载旧包，再安装新包。新包沿用 `subagent-codebuddy` 配置条目 ID。
+从旧包名迁移时，先确认同一 profile 内使用共享工具桥的其他插件也支持新包名。然后卸载旧 CodeBuddy 插件和旧共享包（`@flg1217/dsh-mcp-tool-server` 或更早的 `@flg1217/dsh-mcp`），再按下面顺序安装。新包沿用原有配置条目 ID。
 
 ```bash
-dsh plugin --profile web add github:Elgalas/dsh-mcp-tool-server#babd2ebe170645afc194e38db80f84b1379e30ab
+dsh plugin --profile web add github:Elgalas/dsh-mcp-tool-server#a971a66bd5d590ac0b19d5f4dfae08c827ed2941
 dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy
 ```
 
 使用本地安装包时：
 
 ```bash
-dsh plugin --profile web add ./flg1217-dsh-mcp-tool-server-0.1.3.tgz
+dsh plugin --profile web add ./elgalas-dsh-mcp-tool-server-0.1.3.tgz
 dsh plugin --profile web add ./elgalas-dsh-subagent-codebuddy-0.1.3.tgz
 ```
 

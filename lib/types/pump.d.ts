@@ -32,7 +32,7 @@ import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { AcpTimeouts } from './acp.js';
 import type { TodoListState } from './todo-bridge.js';
 import type { AttachmentsSaveFace } from './tool-image.js';
-import type { DshSurfaceTool, DshToolRunResult } from '@flg1217/dsh-mcp-tool-server';
+import type { DshSurfaceTool, DshToolRunResult } from '@elgalas/dsh-mcp-tool-server';
 /**
  * 泵释放后继续盯一条迟到结果(独立于泵的一次性订阅)。
  *
