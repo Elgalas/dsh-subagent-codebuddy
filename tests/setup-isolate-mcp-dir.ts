@@ -22,6 +22,12 @@ import { afterAll } from 'vitest'
 const isolatedDir = mkdtempSync(join(tmpdir(), 'dsh-mcp-test-'))
 process.env['DSH_CODEBUDDY_MCP_DIR'] = isolatedDir
 
+// 模型目录同样隔离:默认实现会读真实的 ~/.codebuddy/local_storage 实时目录,
+// 否则断言依赖本机装了什么模型(本机 30 条会覆盖掉 fixture 期望)。
+const isolatedConfigDir = mkdtempSync(join(tmpdir(), 'dsh-codebuddy-config-'))
+process.env['CODEBUDDY_CONFIG_DIR'] = isolatedConfigDir
+
 afterAll(() => {
   rmSync(isolatedDir, { recursive: true, force: true })
+  rmSync(isolatedConfigDir, { recursive: true, force: true })
 })
