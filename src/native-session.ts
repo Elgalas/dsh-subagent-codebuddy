@@ -99,6 +99,7 @@ export async function messagesToRecords(
   system?: string,
   bridgeMode: 'mcp' | 'delegate' = 'delegate',
   guidance: ImageReadGuidance = 'native',
+  ptcOnly = false,
 ): Promise<NativeRecord[]> {
   const records: NativeRecord[] = []
   const toolNames = new Map<string, string>()
@@ -127,7 +128,7 @@ export async function messagesToRecords(
       timestamp: stamp(),
       type: 'message',
       role: 'user',
-      content: [{ type: 'input_text', text: systemInstructionsText(system, false, bridgeMode, guidance) }],
+      content: [{ type: 'input_text', text: systemInstructionsText(system, false, bridgeMode, guidance, ptcOnly) }],
       __codebuddyLocal: { sensitiveUserInputReviewed: true },
       providerData: { agent: 'cli' },
       ...base(),

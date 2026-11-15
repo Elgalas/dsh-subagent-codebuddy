@@ -17,7 +17,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import { listCodebuddyModelIdsAsync } from './models.js'
 import { resolveSpawnableCommand } from './settings.js'
-import type { ModelCapabilityIndex } from './model-capabilities.js'
+import { catalogModelName, createCatalogSource, findCatalogModel, productFilesNear, readBundledCatalog, readLiveCatalog } from './catalog.js'
+import type { CatalogSource } from './catalog.js'
 
 /** webStartup 服务面(只读本路由需要的字段)。 */
 interface WebStartupFace {
@@ -103,7 +104,7 @@ function isTrustedApiRequest(req: IncomingMessage, trustedHosts: readonly string
 export function registerCodebuddyModelsRoute(
   ctx: Context,
   readCommand: () => string,
-  capabilities: ModelCapabilityIndex,
+  catalog: CatalogSource = createCatalogSource(),
 ): () => void {
   const injectable = ctx as unknown as {
     inject?: (deps: string[], fn: (injected: Context) => void) => void
@@ -129,15 +130,33 @@ export function registerCodebuddyModelsRoute(
       if (!isTrustedApiRequest(req, startup?.trustedHosts ?? [])) return fail(403, 'untrusted request')
       const resolved = resolveSpawnableCommand(readCommand())
       try {
-        const ids = await listCodebuddyModelIdsAsync(resolved.command, resolved.args)
+        const snapshot = catalog.current()
+        const known = snapshot.selectable.length > 0
+          ? [...snapshot.selectable]
+          : snapshot.models.map(model => model.id)
+        let ids = known
+        if (ids.length === 0) {
+          // 目录完全不可用(无实时缓存、无 bundled 文件)时才 spawn CLI 探测。
+          const files = productFilesNear([...resolved.args, resolved.command])
+          const fallback = createCatalogSource({ bundled: () => readBundledCatalog(files) }).current()
+          ids = fallback.models.map(model => model.id)
+          if (ids.length === 0) ids = await listCodebuddyModelIdsAsync(resolved.command, resolved.args)
+        }
         res.writeHead(200, { 'content-type': 'application/json' })
-        // 名称带模态后缀:设置卡"获取所有模型"是用户挑默认模型的地方,
-        // 图片能力(多模态/仅文本)必须在这里可见。
+        // 名称带倍率与模态后缀:设置卡"获取所有模型"是用户挑默认模型的地方,
+        // 价格(与 dsh-connect-workbuddy 同口径)与图片能力都必须在这里可见。
+        // `id` 始终是写回设置的真值,`name` 只是展示串(客户端按 id 提交)。
         res.end(JSON.stringify({
           ok: true,
           models: ids.map((id) => {
-            const capability = capabilities.capabilityOf(id)
-            return { id, name: `${id}${capability.supportsImages ? ' · 支持图片输入' : ' · 仅文本'}` }
+            const entry = findCatalogModel(snapshot, id)
+            if (entry === undefined) return { id, name: `${id} · 仅文本` }
+            return {
+              id,
+              name: `${catalogModelName(entry)}${entry.modality === 'multimodal' ? ' · 支持图片输入' : ' · 仅文本'}`,
+              credits: entry.credits,
+              contextWindow: entry.contextWindow,
+            }
           }),
         }))
       } catch (error) {

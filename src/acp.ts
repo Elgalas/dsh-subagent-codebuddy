@@ -68,13 +68,33 @@ export const DEFAULT_ACP_RUN_TIMEOUTS = {
  * 版本升级若新增内置工具:默认不可见(比"漏禁"安全),不再逐个维护白名单。
  * 逃生口:用户 `extraArgs` 排在 `--tools` 之后,可用 `--tools default` 覆盖本策略。
  */
-export function cliToolPolicyArgs(bridgeMode: 'mcp' | 'delegate' | undefined = 'mcp'): string[] {
+export function cliToolPolicyArgs(
+  bridgeMode: 'mcp' | 'delegate' | undefined = 'mcp',
+  ptcOnly = false,
+): string[] {
+  // PTC 会话:原生工具必须全禁(help:--tools "" = 禁用全部)。放行 Read 会把
+  // 镜像调用 cli_read 打到 dsh read,而 PTC 只放行 run_code → 整个回合被判
+  // ModelBehaviorError(旧会话根因之一)。读图改走 run_code 程序内的
+  // tools.read_image,结果随程序输出带回,不经 CLI 图片通道。
+  if (ptcOnly) return ['--tools', '']
   // Read 放行(读图必需):CLI 内置读图管线对任意模型适配(实测纯文本模型经
   // Read 读图也能看到图片内容),而 MCP 工具结果里的图片会被 CLI 按模型能力
   // 过滤(function_call_result → "[Image content filtered - current model does
   // not support images]")——对不支持图片的模型,Read 是唯一能拿到图片内容的
   // 通道。其余内置工具仍全禁(对等能力走 dsh)。
   return ['--tools', bridgeMode === 'delegate' ? 'DelegateTool,Read' : 'Read']
+}
+
+/**
+ * 工具面是否就是 PTC 的 `run_code` 单工具面。
+ *
+ * 判定只认"只有 run_code"这一形态:混入别的名字说明不是 PTC 预设(或工具面
+ * 读得太早),此时保守放行 Read,不擅自改变 CLI 工具策略。
+ * @param surface - 模型可见工具面(未知返回 false)。
+ * @returns 是否按 PTC 单工具面处理。
+ */
+export function isPtcOnlySurface(surface: readonly { readonly name: string }[] | undefined): boolean {
+  return surface !== undefined && surface.length === 1 && surface[0]?.name === 'run_code'
 }
 
 /** 动态空闲超时预算(测试注入小值压缩时间)。 */

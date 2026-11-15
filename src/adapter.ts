@@ -33,26 +33,39 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { steerDebug } from './steer-debug.js'
 import { ReasoningEffortId, LlmAdapter } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, ModelModality, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ConversationStore } from './conversations.js'
 import { conversationFilePath, messagesToRecords, uuidv7, writeConversationFile } from './native-session.js'
 import type { NativeRecord } from './native-session.js'
+import type { DshSurfaceTool } from '@flg1217/dsh-mcp-tool-server'
 import { buildPrompt, lastUserPrompt, resumeReplayPrompt, systemInstructionsText } from './serialize.js'
 import { TodoListState } from './todo-bridge.js'
 import { AttachmentsSaveFace } from './tool-image.js'
-import { AcpConnection, DEFAULT_ACP_RUN_TIMEOUTS, cliToolPolicyArgs, isProgressUpdate, usageOfUpdate } from './acp.js'
+import { AcpConnection, DEFAULT_ACP_RUN_TIMEOUTS, cliToolPolicyArgs, isProgressUpdate, isPtcOnlySurface, usageOfUpdate } from './acp.js'
 import { mcpConfigArgs } from './mcp-config.js'
 import { registerDshMcpServer } from '@flg1217/dsh-mcp-tool-server'
 import type { AcpPromptResult, AcpTimeouts, AcpUpdate } from './acp.js'
 import { failureOfError, formatFailureLine, isFailureOutcome, parseCodebuddyFailure } from './failure.js'
 import type { CodebuddyFailure } from './failure.js'
 import { TurnPump } from './pump.js'
+import { createModelPlan } from './model-plan.js'
 import { syncCliIntegrations } from './cli-integrations.js'
 import type { ImageReadGuidance, PumpHost } from './pump.js'
 import { listCodebuddyModelIdsAsync } from './models.js'
 import { createModelCapabilityIndex } from './model-capabilities.js'
 import type { ModelCapabilityIndex } from './model-capabilities.js'
+import {
+  catalogInputModalities,
+  catalogModelName,
+  effortLabel,
+  createCatalogSource,
+  findCatalogModel,
+  productFilesNear,
+  readBundledCatalog,
+  readLiveCatalog,
+} from './catalog.js'
+import type { CatalogSource } from './catalog.js'
 
 /**
  * dsh system prompt 的版本哈希(16 位十六进制)。
@@ -166,6 +179,15 @@ export interface CodebuddyAdapterOptions {
   prefixArgs: string[]
   /** 读取当前默认模型(调用时求值,设置面板改默认模型后对新请求实时生效)。 */
   modelOf: () => string
+  /**
+   * 模型优先顺序(设置里的完整列表,第一项是默认模型)。配额/限流失败且
+   * 本回合尚无产出时,回合泵按此顺序换下一个模型重开 CLI 会话。
+   */
+  modelFallbacksOf?: () => readonly string[]
+  /** 配额/限流失败时是否允许自动换模型(默认 true)。 */
+  fallbackOnQuotaOf?: () => boolean
+  /** 子代理默认思考强度('' = 不传 `--effort`)。 */
+  defaultEffortOf?: () => string
   /** 传给 `--permission-mode` 的权限模式。 */
   permissionMode: string
   /** 追加的额外 CodeBuddy 参数。 */
@@ -176,7 +198,6 @@ export interface CodebuddyAdapterOptions {
    */
   bridgeMode?: 'mcp' | 'delegate'
   bridgeModeOf?: () => 'mcp' | 'delegate'
-  admittedToolsOf?: (sessionId: string) => ReadonlySet<string> | undefined
   /** 动态空闲超时预算(可选,默认见 {@link DEFAULT_ACP_RUN_TIMEOUTS})。 */
   timeouts?: AcpTimeouts
   /** 静默失败自动重试次数(默认 2:首次 + 1 次续跑)。 */
@@ -194,6 +215,11 @@ export interface CodebuddyAdapterOptions {
    * 测试注入假索引,避免读真实 `~/.codebuddy`)。
    */
   capabilities?: ModelCapabilityIndex
+  /**
+   * 模型目录来源(名册/倍率/窗口/档位/原生模态)。默认读 CLI 实时目录,
+   * bundled `product*.json` 只作离线兜底;测试注入固定快照。
+   */
+  catalog?: CatalogSource
 }
 
 /**
@@ -261,6 +287,9 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
   /** 模型图片能力索引(`models.json` 的 `supportsImages`;未知按仅文本)。 */
   private readonly capabilities: ModelCapabilityIndex
 
+  /** 模型目录来源(实时名册/倍率/窗口/档位/模态)。 */
+  private readonly catalog: CatalogSource
+
   constructor(
     private readonly ctx: Context,
     private readonly options: CodebuddyAdapterOptions,
@@ -268,10 +297,41 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
     super()
     this.conversations = options.store ?? new ConversationStore()
     this.capabilities = options.capabilities ?? createModelCapabilityIndex()
+    this.catalog = options.catalog ?? createCatalogSource({
+      live: () => readLiveCatalog(),
+      bundled: () => readBundledCatalog(productFilesNear([...options.prefixArgs, options.command])),
+    })
   }
 
-  /** 该模型是否原生支持图片输入(未登记/字段缺失按 false)。 */
+  /**
+   * 该模型是否原生支持图片输入。
+   *
+   * 以目录的原生模态表为准(精确 id + 平台否定票),`models.json` 只在目录
+   * 缺项时兜底——平台 `supportsImages` 对纯文本模型也常为 true,不能直接采信。
+   * @param model - 模型 id。
+   * @returns 是否可按多模态引导。
+   */
+  /**
+   * 模型本 step 真正能直接调用的工具面。
+   *
+   * 来源只能是 `GenerateOptions.tools` —— 它是 dsh 交给 provider 的那份声明,
+   * PTC 会话里就是 `[run_code]`。**不能用注册表**(`tools.schemas()`):注册表
+   * 里没有执行器传输工具,拿它当工具面会让桥/尾注描述一组模型其实直接调不到
+   * 的工具(旧会话的 `unknown tool "read"` 连跪就是这个口径错误)。
+   * @param options - 本 step 的模型请求。
+   * @returns 该请求的工具声明;无工具时为空数组。
+   */
+  private surfaceOf(options: GenerateOptions): readonly DshSurfaceTool[] {
+    return options.tools?.map(tool => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+    })) ?? []
+  }
+
   imageCapableOf(model: string): boolean {
+    const entry = findCatalogModel(this.catalog.current(), model)
+    if (entry !== undefined) return entry.modality === 'multimodal'
     return this.capabilities.capabilityOf(model).supportsImages
   }
 
@@ -379,15 +439,20 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
     childSession: TurnSessionFace,
     turnStep: { turn: number; step: number },
   ): Promise<{ kind: 'skip' } | { kind: 'pump'; pump: TurnPump }> {
-    const admittedTools = this.options.admittedToolsOf?.(sessionId)
-      ?? (options.tools === undefined ? undefined : new Set(options.tools.map(tool => tool.name)))
+    const toolSurface = this.surfaceOf(options)
     const existing = TurnPump.forSession(sessionId)
     if (existing !== undefined) {
-      existing.updateAdmittedTools(admittedTools)
+      existing.updateToolSurface(toolSurface)
       return { kind: 'pump', pump: existing }
     }
 
     const model = options.model ?? this.options.modelOf()
+    // 配额降级用的尝试顺序:显式点名的模型排第一,其余按设置的优先顺序补齐。
+    const modelPlan = createModelPlan(model, this.options.modelFallbacksOf?.() ?? [])
+    const defaultEffort = this.options.defaultEffortOf?.() ?? ''
+    const reasoningEffort = options.reasoningEffort === undefined
+      ? (defaultEffort === '' ? undefined : defaultEffort)
+      : String(options.reasoningEffort)
     const bridgeMode = this.options.bridgeModeOf?.() ?? this.options.bridgeMode
     // 读图引导按工具在场情况变化(read_image 在场即原生;AGY 仅兜底)。
     const imageGuidance = this.imageGuidanceFor(model)
@@ -419,7 +484,13 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       // system prompt 变了(或这个会话还从未发过):整份补发一次,模型由此拿到
       // 最新的 dsh 侧纪律(优先用 dsh_* 工具等)。
       if (system !== undefined && system.trim().length > 0 && record.systemHash !== systemHash) {
-        const block = systemInstructionsText(system, record.systemHash !== undefined, bridgeMode ?? 'delegate', imageGuidance)
+        const block = systemInstructionsText(
+          system,
+          record.systemHash !== undefined,
+          bridgeMode ?? 'delegate',
+          imageGuidance,
+          isPtcOnlySurface(this.surfaceOf(options)),
+        )
         prompt = `${block}\n\n${prompt}`
       }
       resume = { acpId: record.acpId }
@@ -453,8 +524,11 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       prefixArgs: this.options.prefixArgs,
       extraArgs: this.options.extraArgs,
       bridgeMode,
-      admittedTools,
-      ...options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) },
+      toolSurface,
+      ...reasoningEffort === undefined ? {} : { reasoningEffort },
+      // 配额降级:泵在零产出失败时先问 advanceModel(),成功才重启。
+      modelOf: () => modelPlan.current(),
+      ...(this.options.fallbackOnQuotaOf?.() ?? true ? { advanceModel: () => modelPlan.advance() } : {}),
       ...this.options.timeouts === undefined ? {} : { timeouts: this.options.timeouts },
       ...this.options.maxAttempts === undefined ? {} : { maxAttempts: this.options.maxAttempts },
       ...this.options.retryDelayMs === undefined ? {} : { retryDelayMs: this.options.retryDelayMs },
@@ -492,7 +566,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
         ownEvents: () => childSession.ownEvents?.() ?? [],
         ...childSession.append === undefined
           ? {}
-          : { append: (type: string, data: unknown) => childSession.append?.(type, data) },
+          : { append: (type: string, data: unknown, opts?: { surfaceOp?: 'append' }) => childSession.append?.(type, data, opts) },
       },
       turnStep,
       childSession: {
@@ -541,6 +615,7 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
         options.system,
         bridgeMode ?? 'delegate',
         imageGuidance,
+        isPtcOnlySurface(this.surfaceOf(options)),
       )
       if (records.length === 0) return undefined
       return { sessionId, file: conversationFilePath(sessionId, cwd, this.options.nativeBaseDir), records }
@@ -1014,24 +1089,44 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
   }
 
   override resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    // Surface 一律声明 text+image:让 dsh 入口门放行带图消息,图片块进历史后
-    // 交给下游——CodeBuddy 侧有内置读图管线,对任意模型适配图片工具结果
-    // (实测纯文本模型经 CLI 读图同样能看到图片内容)。内部分流(读图引导
-    // 的回退路径、模型目录描述)仍用 imageCapableOf(models.json 真相)。
-    return Promise.resolve({
+    // 逐模型元数据以 CLI 目录为准(窗口/档位/原生模态)。目录缺项时保守回退:
+    // 只声明 text(不谎报多模态)、窗口 1M、档位整套 CLI 档位。入口门是否放行
+    // 带图消息由 inputModalities 决定——目录判定 only-text 的模型不再谎报图片。
+    const entry = findCatalogModel(this.catalog.current(), model)
+    // 目录缺项(自定义模型/离线/CLI 目录未缓存)时回落到 models.json 的用户声明:
+    // 目录是"我们查到的",models.json 是"用户声明的",两者都不猜。
+    const imageCapable = entry === undefined ? this.imageCapableOf(model) : entry.modality === 'multimodal'
+    const efforts = entry?.efforts
+    const shared = {
       provider,
       id: model,
-      name: model,
-      inputModalities: ['text', 'image'],
-      context: { contextWindow: 1_000_000 },
-      // 推理强度:CLI `--effort` 的档位原样暴露(dsh 选择器/子代理 reasoning_effort
-      // 参数据此校验与转发)。不设 defaultEffort:省略时保持 CLI 自身默认。
+      name: entry === undefined ? model : catalogModelName(entry),
+      description: entry === undefined ? undefined : `CodeBuddy (ACP) model ${model}`,
+      inputModalities: (imageCapable ? ['text', 'image'] : ['text']) as readonly ModelModality[],
+      context: { contextWindow: entry?.contextWindow ?? 1_000_000 },
+    }
+    if (efforts === undefined || efforts.length === 0) {
+      // 目录明确"无推理档位"的模型不暴露 efforts(传了会被 dsh 拒);目录缺项时
+      // 保留整套 CLI 档位,避免把未知当无。
+      if (entry === undefined) {
+        return Promise.resolve({
+          ...shared,
+          reasoning: {
+            efforts: CODEBUDDY_EFFORTS.map(effort => ({
+              id: ReasoningEffortId(effort.level),
+              name: effort.name,
+              description: effort.description,
+            })),
+          },
+        })
+      }
+      return Promise.resolve({ ...shared })
+    }
+    return Promise.resolve({
+      ...shared,
       reasoning: {
-        efforts: CODEBUDDY_EFFORTS.map(effort => ({
-          id: ReasoningEffortId(effort.level),
-          name: effort.name,
-          description: effort.description,
-        })),
+        efforts: efforts.map(id => ({ id: ReasoningEffortId(id), name: effortLabel(id) })),
+        ...(entry?.defaultEffort === undefined ? {} : { defaultEffort: ReasoningEffortId(entry.defaultEffort) }),
       },
     })
   }
@@ -1042,11 +1137,16 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
   }
 
   /**
-   * 主模型选择器的模型目录:`codebuddy --help` 解析出的 id ∪ 设置里的默认模型。
+   * 主模型选择器的模型目录:目录里的可选用名册(实时目录 `agents[].models`,
+   * 离线时 bundled 兜底)∪ 设置里的默认模型。
    *
-   * 目录路径会在客户端每次拉取时被调用,且 CLI 可能缺失/挂起——因此
-   * 异步 spawn + 超时、成功缓存 10 分钟、失败缓存 60 秒、并发合并,
-   * 并且**永不抛错**:CLI 不可用时回退到配置模型,保证 provider 仍可选择。
+   * 名称带积分倍率(`DeepSeek-V4.1-Flash · x0.11`)——与 dsh-connect-workbuddy
+   * 同口径:宿主原样渲染 `name`,倍率不进 description、不另设字段。description
+   * 保留 `CodeBuddy (ACP) model <id> · 支持图片输入|仅文本`,因为子代理模型
+   * 目录(list_subagent_models)把 description 当唯一通道。
+   *
+   * 目录路径会被客户端每次拉取时调用,CLI 可能缺失/挂起——因此异步 spawn
+   * 只用于扩展 id、成功缓存 10 分钟、失败缓存 60 秒、并发合并,**永不抛错**。
    */
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const now = Date.now()
@@ -1054,34 +1154,46 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
     if (this.modelFetch !== undefined) return this.modelFetch
     const configured = this.options.modelOf()
     this.modelFetch = (async (): Promise<readonly LlmModelInfo[]> => {
-      try {
-        const ids = await listCodebuddyModelIdsAsync(this.options.command, this.options.prefixArgs)
-        const all = [...new Set([...ids, ...(configured.length > 0 ? [configured] : [])])]
-        // 目录条目带模态后缀:子代理模型目录(list_subagent_models)与主模型
-        // 选择器都以 description 为唯一可见通道,父代理据此挑多模态模型。
-        // inputModalities 一律 text+image(入口门放行带图消息,与 resolveModel
-        // 的 surface 口径一致);真实能力只体现在 description 后缀。
-        const models = all.map((id) => {
-          const capability = this.capabilities.capabilityOf(id)
+      const snapshot = this.catalog.current()
+      let ids = snapshot.selectable.length > 0
+        ? [...snapshot.selectable]
+        : snapshot.models.map(model => model.id)
+      if (ids.length === 0) {
+        // 目录完全不可用(无实时缓存、无 bundled 文件)时退回 CLI 名册。
+        ids = await listCodebuddyModelIdsAsync(this.options.command, this.options.prefixArgs).catch(() => [])
+      }
+      const all = [...new Set([...ids, ...(configured.length > 0 ? [configured] : [])])]
+      const models = all.map((id): LlmModelInfo => {
+        const entry = findCatalogModel(snapshot, id)
+        if (entry === undefined) {
+          const imageCapable = this.imageCapableOf(id)
           return {
             provider,
             id,
             name: id,
-            description: `CodeBuddy (ACP) model ${id}${capability.supportsImages ? ' · 支持图片输入' : ' · 仅文本'}`,
-            inputModalities: ['text', 'image'] as const,
+            description: `CodeBuddy (ACP) model ${id}${imageCapable ? ' · 支持图片输入' : ' · 仅文本'}`,
+            inputModalities: imageCapable ? ['text', 'image'] : ['text'],
           }
-        })
-        this.modelCache = { models, at: Date.now() }
-        return models
-      } catch {
-        const fallback = this.modelCache?.models
-          ?? (configured.length > 0 ? [{ provider, id: configured, name: configured }] : [])
-        this.modelCache = { models: fallback, at: Date.now() - SUCCESS_TTL_MS + FAILURE_TTL_MS }
-        return fallback
-      } finally {
-        this.modelFetch = undefined
-      }
-    })()
+        }
+        return {
+          provider,
+          id,
+          name: catalogModelName(entry),
+          description: `CodeBuddy (ACP) model ${id}${entry.modality === 'multimodal' ? ' · 支持图片输入' : ' · 仅文本'}`,
+          inputModalities: catalogInputModalities(entry),
+          ...(entry.free
+            ? { badge: { text: { en: 'free', zh: '免费' }, tone: 'success' as const } }
+            : {}),
+        }
+      })
+      this.modelCache = { models, at: Date.now() }
+      return models
+    })().catch((): readonly LlmModelInfo[] => {
+      const fallback = this.modelCache?.models
+        ?? (configured.length > 0 ? [{ provider, id: configured, name: configured }] : [])
+      this.modelCache = { models: fallback, at: Date.now() - SUCCESS_TTL_MS + FAILURE_TTL_MS }
+      return fallback
+    }).finally(() => { this.modelFetch = undefined })
     return this.modelFetch
   }
 }

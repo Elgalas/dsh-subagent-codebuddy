@@ -63,7 +63,18 @@ export declare const DEFAULT_ACP_RUN_TIMEOUTS: {
  * 版本升级若新增内置工具:默认不可见(比"漏禁"安全),不再逐个维护白名单。
  * 逃生口:用户 `extraArgs` 排在 `--tools` 之后,可用 `--tools default` 覆盖本策略。
  */
-export declare function cliToolPolicyArgs(bridgeMode?: 'mcp' | 'delegate' | undefined): string[];
+export declare function cliToolPolicyArgs(bridgeMode?: 'mcp' | 'delegate' | undefined, ptcOnly?: boolean): string[];
+/**
+ * 工具面是否就是 PTC 的 `run_code` 单工具面。
+ *
+ * 判定只认"只有 run_code"这一形态:混入别的名字说明不是 PTC 预设(或工具面
+ * 读得太早),此时保守放行 Read,不擅自改变 CLI 工具策略。
+ * @param surface - 模型可见工具面(未知返回 false)。
+ * @returns 是否按 PTC 单工具面处理。
+ */
+export declare function isPtcOnlySurface(surface: readonly {
+    readonly name: string;
+}[] | undefined): boolean;
 /** 动态空闲超时预算(测试注入小值压缩时间)。 */
 export interface AcpTimeouts {
     firstMs?: number;

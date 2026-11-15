@@ -215,9 +215,13 @@ describe('子代理失败的临终遗言(失败原因必须回到主代理)', ()
     expect(closingTexts(events)).toHaveLength(0)
   }, 15_000)
 
-  it('失败前已有文本 → 不补(agent-loop 的 assistant/attempt 流文本才是临终遗言)', async () => {
-    // AssistantOutputFold 优先选 assistant/message;此时补写会把真实的
-    // 半截产出顶掉,通知里只剩失败原因、丢掉子代理已经干出来的活。
+  it('只流过文本、没有收尾消息 → 仍补(否则失败原因整条丢失)', async () => {
+    // 2026-11-14 修正:旧断言是"有流式文本就不补",理由是
+    // AssistantOutputFold 优先选 assistant/message。但旧会话取证显示,agent-loop
+    // 硬失败时只留 assistant/attempt(finish error)、**没有** assistant/message,
+    // 于是主代理拿到的是"failed before it finished / It left no closing message"
+    // ——既没有半截产出也没有失败原因。判据改成"本回合有没有收尾消息"后,这种情况
+    // 必须补:失败原因比半截产出更重要。
     mockedSpawn.mockImplementation(() => {
       const p = fakeAcpProc()
       autoHandshake(p)
@@ -237,6 +241,9 @@ describe('子代理失败的临终遗言(失败原因必须回到主代理)', ()
     const { adapter, events } = makeRecordingAdapter({ maxAttempts: 1, retryDelayMs: 10 })
     const chunks = await drainFail(adapter, 's-child-partial')
     expect(chunks.at(-1)?.reason?.kind).toBe('error')
-    expect(closingTexts(events)).toHaveLength(0)
+    const texts = closingTexts(events)
+    expect(texts).toHaveLength(1)
+    expect(texts[0]).toContain('CodeBuddy 回合失败')
+    expect(texts[0]).toContain('category=quota')
   }, 15_000)
 })

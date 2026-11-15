@@ -19,7 +19,17 @@ export const CODEBUDDY_SETTINGS_NAMESPACE = 'subagent-codebuddy'
 /** 当前生效的 CodeBuddy 配置(从 volatile 活引用实时读取)。 */
 export interface EffectiveCodebuddySettings {
   command: string
+  /** 默认模型(优先顺序的第一个;`models` 为空时生效)。 */
   model: string
+  /**
+   * 模型优先顺序(第一个 = 默认)。配额/限流失败时按此顺序降级重试;
+   * 第一项为空串以外的值才参与(见 index.ts `settingsOf`)。
+   */
+  models: string[]
+  /** 子代理默认思考强度('' = 不传 `--effort`,由 CLI/模型自定)。 */
+  defaultEffort: string
+  /** 配额/限流失败时是否自动换到下一个模型(默认开)。 */
+  fallbackOnQuota: boolean
   permissionMode: string
   registerSubagentTools: boolean
   bridgeMode: 'mcp' | 'delegate'

@@ -31,9 +31,10 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { ToolCallId, createAssistantMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
-import { AcpConnection, DEFAULT_ACP_RUN_TIMEOUTS, cliToolPolicyArgs, isProgressUpdate, toolNameOf, usageOfUpdate } from './acp.js'
+import { AcpConnection, DEFAULT_ACP_RUN_TIMEOUTS, cliToolPolicyArgs, isProgressUpdate, isPtcOnlySurface, toolNameOf, usageOfUpdate } from './acp.js'
+import { appendFailureClosingMessage } from './closing-message.js'
 import type { AcpClientRequest, AcpPromptResult, AcpTimeouts, AcpUpdate } from './acp.js'
 import { agentIdFromOutput, SubagentMirror } from './mirror.js'
 import { foldPendingInsertions } from './inbox.js'
@@ -49,13 +50,14 @@ import {
   bridgeTargetTool,
   CLI_MIRROR_TOOL_PREFIX,
   DSH_MCP_SERVER_NAME,
+  isBridgeEligible,
   listDshBridgeTools,
   McpDispatchAbortedError,
   McpDispatchTimeoutError,
   registerDshMcpServer,
   registerMcpLoopDispatcher,
 } from '@flg1217/dsh-mcp-tool-server'
-import type { DshToolRunResult } from '@flg1217/dsh-mcp-tool-server'
+import type { DshSurfaceTool, DshToolRunResult } from '@flg1217/dsh-mcp-tool-server'
 import { syncCliIntegrations } from './cli-integrations.js'
 import { steerDebug } from './steer-debug.js'
 import { mcpConfigArgs } from './mcp-config.js'
@@ -190,7 +192,13 @@ interface Segment {
 /** 会话面(todo 折叠/插话轮询需要 ownEvents;todo 快照写入需要 append)。 */
 export interface PumpSessionFace {
   ownEvents?: () => readonly { type: string; data?: unknown }[]
-  append?: (type: string, data: unknown) => unknown
+  /**
+   * 写会话事件。`opts.surfaceOp` 对 **surface-eligible** 事件(如
+   * `assistant/message`)是**必填**:dsh-session 的 `Session.append` 在缺省时抛
+   * `session event "…" is surface-eligible and requires a surfaceOp marker`
+   * (实测 0.2.2-rc.3),而 pump 的补写调用过去被 `try/catch {}` 静默吞掉。
+   */
+  append?: (type: string, data: unknown, opts?: { surfaceOp?: 'append' }) => unknown
 }
 
 /** 泵的宿主依赖(由 adapter 提供;避免与 adapter.ts 形成运行时循环)。 */
@@ -204,7 +212,11 @@ export interface PumpHost {
    * MCP server、不发 delegate 注册;delegate = 旧 DelegateTool 通道。
    */
   bridgeMode?: 'mcp' | 'delegate'
-  admittedTools?: ReadonlySet<string>
+  /**
+   * 模型可见工具面(`assembly.tools` 投影;含 PTC 的 run_code)。
+   * 桥名单、尾注、CLI `--tools` 策略都以它为准。
+   */
+  toolSurface?: readonly DshSurfaceTool[]
   /** 推理强度(--effort;未选则不传,保持 CLI 默认)。 */
   reasoningEffort?: string
   timeouts?: AcpTimeouts
@@ -215,6 +227,16 @@ export interface PumpHost {
   /** dsh 会话 id(泵的键,也是回放工具注册的 scope)。 */
   dshSessionId: string
   model: string
+  /**
+   * 当前 attempt 的模型(缺省用 {@link PumpHost.model})。配额降级时由
+   * adapter 的模型游标推进,`runAttempt` 每次重读。
+   */
+  modelOf?: () => string
+  /**
+   * 配额/限流失败时前进到下一个模型;返回 false 表示没有更多模型。
+   * 只有「零产出失败」才会被询问(见 `failRun`)。
+   */
+  advanceModel?: () => boolean
   /** 读图引导:按当前模型是否支持图片输入分流(缺省 native,保持旧行为)。 */
   imageGuidance?: ImageReadGuidance
   cwd: string
@@ -385,7 +407,7 @@ export type ImageReadGuidance = 'native' | 'agy' | 'unavailable'
  * @param prefix - 工具名前缀:delegate 为 `dsh_`,mcp 为 `mcp__dsh__`。
  * @returns 一句可拼进尾注/系统说明的中文引导。
  */
-function imageReadLine(guidance: ImageReadGuidance, prefix: 'dsh_' | 'mcp__dsh__'): string {
+function imageReadLine(guidance: ImageReadGuidance, prefix: string): string {
   if (guidance === 'native') {
     return '读图片用 Read 工具直接读图片文件路径(已放行)——图片会进入你的上下文并由 CodeBuddy 侧适配;不要改用 '
       + `${prefix}read_image_agy 让 AGY 转述,除非用户明确要求 AGY 转述`
@@ -430,17 +452,68 @@ export function dshDelegationNote(guidance: ImageReadGuidance): string {
  * 换成 CLI 呈现的 `mcp__dsh__<工具名>`(参数走各工具的 MCP schema,不再有
  * toolId 中转),并去掉 DelegateTool 形态专属条款。
  */
-export function mcpDelegationNote(guidance: ImageReadGuidance): string {
+export function mcpDelegationNote(
+  guidance: ImageReadGuidance,
+  surface?: readonly DshSurfaceTool[],
+): string {
+  // 工具枚举按**实际工具面**生成:写死清单会在 win32(无 bash)、PTC(只有
+  // run_code)、插件增删工具时把模型引向不存在的名字。
+  const names = surface === undefined
+    ? undefined
+    : new Set(surface.filter(tool => isBridgeEligible(tool.name)).map(tool => tool.name))
+  const exposed = names === undefined || names.size === 0 ? undefined : [...names].map(name => `mcp__dsh__${name}`)
+  const exposeLine = exposed === undefined
+    ? '- 一律使用 mcp__dsh__<工具名>,参数按各工具自带 schema 传。CLI 原生工具已**全部禁用**,不在你的工具列表里,不要尝试。'
+    : `- 本会话可用的 dsh 工具就是这些(CLI 原生工具已**全部禁用**,不要尝试):${exposed.join('、')}。参数按各工具自带 schema 传。`
+  // 具体工具名按面取:win32 没有 bash、插件没装 subagent 时,写死名字会把
+  // 模型引向 `Tool mcp__dsh__bash not found in agent cli`(旧会话实测)。
+  const shell = names?.has('bash') === true ? 'bash' : names?.has('pwsh') === true ? 'pwsh' : undefined
+  const shellTool = shell === undefined ? undefined : `mcp__dsh__${shell}`
+  const subagentTool = names?.has('subagent') === true ? 'mcp__dsh__subagent' : undefined
+  const modelsTool = names?.has('list_subagent_models') === true ? 'mcp__dsh__list_subagent_models' : undefined
+  const writeTool = names?.has('write') === true ? 'mcp__dsh__write' : undefined
   return [
   '[dsh 运行环境]',
   '本次调用由 dsh 框架发起:你(CodeBuddy)作为 dsh 的模型后端运行。',
-  '本会话的全部 dsh 工具以 MCP 工具暴露,名字形如 mcp__dsh__bash / mcp__dsh__edit / mcp__dsh__subagent;输入参数按各工具自带的 schema 传(结构化约束)。它们在 dsh 侧执行(受沙箱/审批约束、进会话日志与审计):',
-  '- 一律使用 mcp__dsh__<工具名>(bash、pwsh、read、read_image、write、edit、glob、grep、subagent、send_message、job_output……)。CLI 原生工具已**全部禁用**,不在你的工具列表里,不要尝试。',
+  '本会话的 dsh 工具以 MCP 工具暴露,名字形如 mcp__dsh__<工具名>;输入参数按各工具自带的 schema 传(结构化约束)。它们在 dsh 侧执行(受沙箱/审批约束、进会话日志与审计):',
+  exposeLine,
   `- ${imageReadLine(guidance, 'mcp__dsh__')}。`,
-  `- 前台 MCP 调用 ${CLI_TOOL_CALL_TIMEOUT_S} 秒超时:可能超过 20 秒的命令(构建/测试/对战模拟/服务等)一律 mcp__dsh__bash + run_in_background:true——任务进侧栏"后台任务",完成时自动通知并唤醒你继续;前台只跑秒级命令。绝不要用 docker exec -d、自写轮询脚本等外部后台方式:它们不进 dsh——面板不显示、完成收不到,回合结束后对话显示"已完成"而任务还在跑,用户只能来催你。`,
-  '- 沙箱拒绝不绕行:mcp__dsh__bash 报 [sandbox: file access denied ...] 时,按工具描述用 sandbox_permissions + justification 走提权审批(审批弹窗即用户同意);被拒或会话禁用审批时即为最终结果,不要换路重试。',
-  '- 委派子任务:先 mcp__dsh__list_subagent_models 查可用路由,再用 mcp__dsh__subagent 委派(默认后台;结算通知会唤醒你);继续同一子代理用 mcp__dsh__send_message(input.childId)。',
-  '- JSON 参数转义:要在文件里写字面反斜杠+n(如 Python 的 print("\\n"))时,JSON 参数必须写 \\\\n(双反斜杠);含大量转义的文件优先用 mcp__dsh__write 的 content 配 chr(10)/拼接构造,或分段小步写入。',
+  ...shellTool === undefined ? [] : [
+    `- 前台 MCP 调用 ${CLI_TOOL_CALL_TIMEOUT_S} 秒超时:可能超过 20 秒的命令(构建/测试/对战模拟/服务等)一律 ${shellTool} + run_in_background:true——任务进侧栏"后台任务",完成时自动通知并唤醒你继续;前台只跑秒级命令。绝不要用 docker exec -d、自写轮询脚本等外部后台方式:它们不进 dsh——面板不显示、完成收不到,回合结束后对话显示"已完成"而任务还在跑,用户只能来催你。`,
+    `- 沙箱拒绝不绕行:${shellTool} 报 [sandbox: file access denied ...] 时,按工具描述用 sandbox_permissions + justification 走提权审批(审批弹窗即用户同意);被拒或会话禁用审批时即为最终结果,不要换路重试。`,
+  ],
+  ...subagentTool === undefined ? [] : [
+    `- 委派子任务:${modelsTool === undefined ? '' : `先 ${modelsTool} 查可用路由,再`}用 ${subagentTool} 委派(默认后台;结算通知会唤醒你);继续同一子代理用 mcp__dsh__send_message(input.childId)。`,
+  ],
+  ...writeTool === undefined ? [] : [
+    `- JSON 参数转义:要在文件里写字面反斜杠+n(如 Python 的 print("\\n"))时,JSON 参数必须写 \\\\n(双反斜杠);含大量转义的文件优先用 ${writeTool} 的 content 配 chr(10)/拼接构造,或分段小步写入。`,
+  ],
+  '- 你的回合结束后不会自动恢复:不要承诺"等 X 完成后我再汇报/继续"——只有走 dsh 通道的任务会在完成时唤醒你;确实必须用外部方式时,请在回复里如实告诉用户"跑完后需要你叫我一声"。',
+  ].join('\n')
+}
+
+/**
+ * PTC 会话的尾注:模型唯一的直接工具是 `mcp__dsh__run_code`。
+ *
+ * 为什么单列:官方子代理继承父会话的 `ops-ptc` 预设时,host 只允许直接调用
+ * `run_code`,其余工具(即使桥暴露了)一旦被直接调用就抛 ToolNotFoundError。
+ * 旧实现的尾注硬编码 `mcp__dsh__bash / read / edit` 清单,模型照着调 → CLI
+ * 判 ModelBehaviorError,回合无收尾消息地死掉。这里改成只讲 run_code,并把
+ * 程序内 SDK 的调用形态写清楚(`tools.<工具名>`),与 `tools:sdk` 段落一致。
+ * @param guidance - 读图引导(仅用于说明读图走哪条路)。
+ * @returns 完整的 PTC 尾注文本。
+ */
+export function ptcDelegationNote(guidance: ImageReadGuidance): string {
+  return [
+  '[dsh 运行环境]',
+  '本次调用由 dsh 框架发起:你(CodeBuddy)作为 dsh 的模型后端运行,当前会话是 dsh 的 PTC(程序化工具调用)预设。',
+  '**只有 mcp__dsh__run_code 能直接调用**(输入 `{code, description}`);调用任何其他工具名都会被 dsh 判为未知工具并使整个回合失败——不要在工具列表里找 bash/read/edit,也不要尝试直接调它们。',
+  '- dsh 的全部工具都在 run_code 程序里通过 `tools` 对象调用:`tools.read({path})`、`tools.bash({command})`、`tools.edit({...})`、`tools.write({...})`、`tools.glob({pattern})`、`tools.grep({pattern})`……(名字就是 dsh 工具名;参数按 dsh 工具 schema)。',
+  `- ${imageReadLine(guidance, 'tools.')}:在程序里调 tools.read_image({ref}) 取图,不要假设自己"看不到图"。`,
+  '- 长命令:程序里 `await tools.bash({command, run_in_background: true})` 进 dsh 后台任务面板,完成时会唤醒你继续;前台调用会阻塞程序并可能超时。',
+  '- 委派子任务:`tools.list_subagent_models()` 查路由,再 `tools.subagent({prompt, ...})`;继续同一子代理用 `tools.send_message({childId, message})`。',
+  '- 沙箱拒绝不绕行:tools.bash 报 [sandbox: file access denied ...] 时,按工具描述用 sandbox_permissions + justification 走提权审批(弹窗即用户同意);被拒即为最终结果,不要换方式重试。',
+  '- CLI 原生工具(Bash/Read/Edit/…)**已全部禁用**,不在你的工具列表里;需要它们时就写等价的 run_code 程序。',
   '- 你的回合结束后不会自动恢复:不要承诺"等 X 完成后我再汇报/继续"——只有走 dsh 通道的任务会在完成时唤醒你;确实必须用外部方式时,请在回复里如实告诉用户"跑完后需要你叫我一声"。',
   ].join('\n')
 }
@@ -454,8 +527,14 @@ export function mcpDelegationNote(guidance: ImageReadGuidance): string {
 export function promptTailFor(
   bridgeMode: 'mcp' | 'delegate' | undefined,
   guidance: ImageReadGuidance = 'native',
+  surface?: readonly DshSurfaceTool[],
 ): string {
-  const note = (bridgeMode ?? 'delegate') === 'mcp' ? mcpDelegationNote(guidance) : dshDelegationNote(guidance)
+  const mode = bridgeMode ?? 'delegate'
+  const note = isPtcOnlySurface(surface)
+    ? ptcDelegationNote(guidance)
+    : mode === 'mcp'
+      ? mcpDelegationNote(guidance, surface)
+      : dshDelegationNote(guidance)
   return '\n\n' + note
 }
 
@@ -474,7 +553,7 @@ export class TurnPump {
   private acpSessionId = ''
   private capturing = true
   private readonly deps: PumpHost
-  private admittedTools: ReadonlySet<string> | undefined
+  private toolSurface: readonly DshSurfaceTool[] | undefined
   private readonly to: typeof DEFAULT_ACP_RUN_TIMEOUTS & AcpTimeouts
   private readonly maxAttempts: number
   private readonly retryDelayMs: number
@@ -484,6 +563,10 @@ export class TurnPump {
   private readonly stepState: PumpStepState
 
   private attempts = 0
+  /** 当前 attempt 使用的模型(配额降级后跟着换;`deps.modelOf` 每次重读)。 */
+  private model: string
+  /** 本回合的失败分类(`failure.ts` 的 category),降级判定用。 */
+  private failureCategory: string | undefined
   /**
    * 尝试代次令牌:restart 立即使其失效(与 attempts 不同——attempts 要等
    * 下一次 runAttempt 才 +1,而旧连接的挂起请求会在 restart 之后立刻迟到
@@ -643,13 +726,14 @@ export class TurnPump {
 
   constructor(deps: PumpHost, private readonly signal: AbortSignal | undefined, stepState: PumpStepState) {
     this.deps = deps
-    this.admittedTools = deps.admittedTools
+    this.model = deps.model
+    this.toolSurface = deps.toolSurface
     this.stepState = stepState
     this.to = { ...DEFAULT_ACP_RUN_TIMEOUTS, ...deps.timeouts }
     this.maxAttempts = deps.maxAttempts ?? 2
     this.retryDelayMs = deps.retryDelayMs ?? 3_000
     this.steerPollMs = deps.steerPollMs ?? 1_200
-    this.promptTail = promptTailFor(deps.bridgeMode, deps.imageGuidance ?? 'native')
+    this.promptTail = promptTailFor(deps.bridgeMode, deps.imageGuidance ?? 'native', deps.toolSurface)
     this.bridgeMode = deps.bridgeMode ?? 'delegate'
     this.boundaryQuietMs = this.to.boundaryQuietMs ?? BOUNDARY_QUIET_MS
     this.usageGraceMs = this.to.usageGraceMs ?? USAGE_GRACE_MS
@@ -665,7 +749,7 @@ export class TurnPump {
     this.disposeLoopDispatcher = registerMcpLoopDispatcher(
       deps.dshSessionId,
       (_sessionId, name, input, lateSink) => this.dispatchMcpCall(name, input, lateSink),
-      () => this.admittedTools,
+      () => this.toolSurface,
     )
     // 常驻任务表重播:CodeBuddy 任务列表跨回合常驻,dsh 的 todos 投影在每个
     // turn/start 清空——回合开头重写一份当前快照,面板跨回合继续显示同一计划。
@@ -678,8 +762,14 @@ export class TurnPump {
     return livePumps.get(sessionId)
   }
 
-  updateAdmittedTools(tools: ReadonlySet<string> | undefined): void {
-    this.admittedTools = tools
+  /** 续段时刷新工具面(同一回合内 tools 可能变化,如计划模式切换)。 */
+  updateToolSurface(surface: readonly DshSurfaceTool[] | undefined): void {
+    this.toolSurface = surface
+  }
+
+  /** 工具面上的裸工具名(桥/delegate 过滤与尾注共用)。 */
+  private get surfaceNames(): ReadonlySet<string> | undefined {
+    return this.toolSurface === undefined ? undefined : new Set(this.toolSurface.map(tool => tool.name))
   }
 
   /** 回合是否已被调用方中止(abort 交给 loop 的中断语义收尾)。 */
@@ -760,15 +850,17 @@ export class TurnPump {
     // 否则 mcpConfigArgs 拿不到 URL → CLI 以"内置工具全禁 + 无 --mcp-config"
     // 启动,该回合零工具且完全静默。
     if (this.bridgeMode === 'mcp') registerDshMcpServer(this.deps.ctx)
+    // 模型每次 attempt 重读:配额降级换模型后,重启要带新 `--model`。
+    this.model = this.deps.modelOf?.() ?? this.deps.model
     const argv = [
       this.deps.command,
       ...this.deps.prefixArgs,
       '--acp',
       '--model',
-      this.deps.model,
+      this.model,
       ...this.deps.reasoningEffort === undefined ? [] : ['--effort', this.deps.reasoningEffort],
       '--dangerously-skip-permissions',
-      ...cliToolPolicyArgs(this.bridgeMode),
+      ...cliToolPolicyArgs(this.bridgeMode, isPtcOnlySurface(this.toolSurface)),
       ...mcpConfigArgs(this.bridgeMode, this.deps.dshSessionId),
       ...this.deps.extraArgs,
     ]
@@ -834,7 +926,7 @@ export class TurnPump {
       const bridgeTools = this.bridgeMode === 'mcp' || parentAgent === undefined
         ? []
         : listDshBridgeTools(this.deps.ctx, parentAgent)
-          .filter(tool => this.admittedTools?.has(bridgeTargetTool(tool.id) ?? '') ?? true)
+          .filter(tool => this.surfaceNames?.has(bridgeTargetTool(tool.id) ?? '') ?? true)
       // 诊断:名单与注册结果落 dsh-start.log——"某桥工具 not found"时第一时间
       // 区分"名单就没生成它"(dsh 侧 schemas 缺失)还是"CLI 侧注册丢失"。
       console.error(`[codebuddy-bridge] session=${this.deps.dshSessionId} mode=${this.bridgeMode} announce ${bridgeTools.length}: ${bridgeTools.map(tool => tool.id).join(',') || '(none)'}`)
@@ -946,6 +1038,13 @@ export class TurnPump {
   /** 失败:首段无产出 → 重启;否则整体失败(消费方抛出,loop 收错误回合)。 */
   private failRun(error: Error, retryable = true): void {
     if (this.finished || this.disposed) return
+    if (this.switchModelOnQuota()) {
+      // 换模型必须开新 CodeBuddy 会话:会话与模型绑定,resume 旧会话会带着
+      // 旧模型的历史重放,CLI 侧也可能直接拒绝。
+      console.error(`[codebuddy-bridge] session=${this.deps.dshSessionId} 模型配额受限——降级到 ${this.model} 重试本回合`)
+      this.restart(true)
+      return
+    }
     if (this.canRestart(retryable)) { this.restart(); return }
     this.failed = error
     this.appendFailureClosingMessage(error)
@@ -966,40 +1065,38 @@ export class TurnPump {
    * 子代理会话的「临终遗言」:零产出失败时补一条 assistant 文本,让失败原因
    * 随 dsh 的结算通知回到主代理。
    *
-   * **为什么必须补**(2026-09-21 实测):dsh 的通知构造
-   * (`subagent/src/continuation-messages.ts`)只带一句通用结论 + 子代理**最后一
-   * 条 assistant 消息**;而硬失败(401/配额/传输错)时 agent-loop 直接
-   * `throw LlmError`,不产生 assistant 消息 → 主代理只收到
-   * "Background subagent X failed before it finished. / It left no closing
-   * message.",**失败原因整条丢失**(用户报障:子代理错误完全没反馈)。
-   * 补写后 `AssistantOutputFold` 会选中它,通知里出现 "Its closing message:
-   * CodeBuddy 中断:…401…"。
-   *
-   * **两道闸门**:
-   * - 只在**子会话**(header.parentSession 存在)补:主会话的失败 UI 本来就有
-   *   "本轮运行失败"卡,补一条"模型没说过的话"只会污染转录。
-   * - 只在**本回合零文本产出**时补:`hasText` 为真时 agent-loop 的
-   *   `assistant/attempt` 流文本已经是临终遗言,而 `AssistantOutputFold`
-   *   优先选 `assistant/message`——补写会把它顶掉。
+   * 实现与全部取证注释见 `closing-message.ts`(抽成纯函数以便用真 `Session`
+   * 写回归测试:过去 `try/catch {}` 把"缺 surfaceOp"吞成了静默 no-op)。
    * @param error - 本回合的失败(已含可读原因,如 failure.ts 分类后的文案)。
    */
   private appendFailureClosingMessage(error: Error): void {
-    if (this.hasText) return
-    if (this.deps.childSession?.header?.parentSession === undefined) return
-    const append = this.deps.session?.append
-    const at = this.deps.turnStep
-    if (append === undefined || at === undefined) return
-    try {
-      append('assistant/message', {
-        turn: at.turn,
-        step: at.step,
-        message: createAssistantMessage({
-          content: [{ type: 'text', text: `CodeBuddy 回合失败:${error.message}` }],
-          source: { provider: 'codebuddy', model: this.deps.model },
-        }),
-        stream: [],
-      })
-    } catch { /* 补写失败不改变失败本身的语义,消费方仍会拿到 error */ }
+    appendFailureClosingMessage({
+      session: this.deps.session,
+      turnStep: this.deps.turnStep,
+      childHeader: this.deps.childSession?.header,
+      model: this.model,
+      log: (message, detail) => {
+        console.error(`[codebuddy-bridge] session=${this.deps.dshSessionId} ${message}`, detail ?? '')
+      },
+    }, error)
+  }
+
+  /**
+   * 配额/限流失败 → 换下一个模型。
+   *
+   * 只在「本回合零产出」时允许:已经流出的文本/已发起的工具调用都属于
+   * 已完成的部分,换模型重来会重复执行工具、也会让用户看到重复内容。
+   * 调用方可通过设置关掉(modelFallbacks 为空或 fallbackOnQuota=false 时
+   * 没有 `advanceModel`)。
+   * @returns 是否已切到新模型(调用方据此重启)。
+   */
+  private switchModelOnQuota(): boolean {
+    if (this.failureCategory !== 'quota') return false
+    if (this.deps.advanceModel === undefined) return false
+    if (this.aborted || this.hasText || this.calls.size > 0) return false
+    if (!this.deps.advanceModel()) return false
+    this.failureCategory = undefined
+    return true
   }
 
   /** 重启资格:失败可续跑、仍是首段、本回合无任何产出、还有重试次数。 */
@@ -1011,14 +1108,25 @@ export class TurnPump {
       && !this.aborted
   }
 
-  private restart(): void {
+  /**
+   * 重开一次 attempt。
+   * @param fresh - 丢弃 CodeBuddy 会话与续接映射(换模型时必须:CLI 会话与
+   * 模型绑定,带旧会话 resume 会重放旧模型历史)。
+   */
+  private restart(fresh = false): void {
     this.disposeProcess()
     this.capturing = true
     // 立即作废旧连接的全部在途回调(迟到 reject 不得污染新 attempt)。
     this.attemptToken += 1
-    // 已登记的 CodeBuddy 会话继续复用之(避免重试丢历史)。
-    if (this.acpSessionId !== '') this.deps.resume = { acpId: this.acpSessionId }
+    if (fresh) {
+      this.deps.forgetConversation?.()
+      this.deps.resume = undefined
+    } else if (this.acpSessionId !== '') {
+      // 已登记的 CodeBuddy 会话继续复用之(避免重试丢历史)。
+      this.deps.resume = { acpId: this.acpSessionId }
+    }
     this.acpSessionId = ''
+    this.failureCategory = undefined
     this.promptError = undefined
     this.promptFailure = undefined
     this.stallTimedOut = false
@@ -1861,6 +1969,7 @@ export class TurnPump {
     // 失败分类:prompt 结果里的 refusal/_meta 错误(配额/认证等不重试),
     // 或 JSON-RPC/传输层错误(带 code/data 分类)。两者都翻成一行可读原因。
     if (this.promptFailure !== undefined) {
+      this.failureCategory = this.promptFailure.category
       this.failRun(
         new Error(`CodeBuddy 中断:${formatFailureLine(this.promptFailure, this.conn?.stderrNote())}`),
         this.promptFailure.retryable,
@@ -1869,6 +1978,7 @@ export class TurnPump {
     }
     if (this.promptError !== undefined) {
       const failure = failureOfError(this.promptError)
+      this.failureCategory = failure.category
       this.failRun(
         new Error(`CodeBuddy ACP 请求失败:${formatFailureLine(failure, this.conn?.stderrNote())}`),
         failure.retryable,

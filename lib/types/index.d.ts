@@ -46,6 +46,15 @@ export interface Config {
     command: Volatile<string>;
     /** 默认 CodeBuddy 模型 ID,默认 `deepseek-v4.1-flash`。 */
     model: Volatile<string>;
+    /**
+     * 模型优先顺序(第一个即默认模型)。配额/限流失败时按顺序降级到下一个,
+     * 见 {@link Config.fallbackOnQuota}。空数组 = 只用 {@link Config.model}。
+     */
+    models: Volatile<string[]>;
+    /** 子代理默认思考强度('' = 不传 `--effort`;可选 minimal/low/medium/high/xhigh/max)。 */
+    defaultEffort: Volatile<string>;
+    /** 配额/限流失败时自动换到下一个可用模型(默认开)。 */
+    fallbackOnQuota: Volatile<boolean>;
     /** 传给 `--permission-mode` 的权限模式,默认 `bypassPermissions`(自动放行)。 */
     permissionMode: Volatile<string>;
     /** 是否注册 opt-in 委派工具(默认关闭)。 */

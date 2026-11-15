@@ -76,6 +76,13 @@ function makeAdapter(
   store?: ConversationStore,
   /** 回放工具注册面的注入口(注册失败重试的回归用)。 */
   toolsHooks?: { registerThrowsOnce?: boolean },
+  /** 模型路由注入口(优先顺序/配额降级/默认思考强度)。 */
+  modelRouting?: {
+    modelOf?: () => string
+    modelFallbacksOf?: () => readonly string[]
+    fallbackOnQuotaOf?: () => boolean
+    defaultEffortOf?: () => string
+  },
 ): Harness {
   const appended: Array<{ type: string; data: unknown; opts?: unknown }> = []
   const createdMetas: Array<Record<string, unknown> | undefined> = []
@@ -174,6 +181,7 @@ function makeAdapter(
     steerPollMs: 20,
     ...(shape.bridgeMode === undefined ? {} : { bridgeMode: shape.bridgeMode }),
     ...(timeouts !== undefined ? { timeouts } : {}),
+    ...(modelRouting ?? {}),
   })
   return {
     adapter, appended, events, createdMetas, shadowEvents, savedImages, registeredTools, registerAttempts, promptParams,
@@ -211,6 +219,8 @@ interface TurnCtl {
   p: FakeAcp
   /** 结束当前在飞的 session/prompt(end_turn)。 */
   settle: (stopReason?: string) => void
+  /** 以 JSON-RPC 错误结束当前在飞的 session/prompt(模拟配额/认证失败)。 */
+  fail: (code: number, message: string) => void
 }
 
 /**
@@ -233,6 +243,7 @@ function mockTurn(
     const ctl: TurnCtl = {
       p,
       settle: (stopReason = 'end_turn') => { for (const id of promptIds.splice(0)) p.respond(id, { stopReason }) },
+      fail: (code, message) => { for (const id of promptIds.splice(0)) p.respondError(id, { code, message }) },
     }
     setup?.(ctl)
     setTimeout(() => script(ctl, index), 5)
@@ -355,6 +366,37 @@ describe('回合泵:一个 CodeBuddy 回合 = 多个原生 step', () => {
     const chunks = await step(h.adapter, makeOptions('s1'))
     expect(chunks.some(c => c.includes('恢复了'))).toBe(true)
     expect(h.spawns()).toBe(2)
+  }, 15_000)
+
+  it('配额失败 → 按优先顺序降级到下一个模型重试本回合', async () => {
+    const h = makeAdapter({}, { ...FAST, maxAttempts: 2, retryDelayMs: 20 }, undefined, undefined, {
+      modelOf: () => 'deepseek-v4.1-flash',
+      modelFallbacksOf: () => ['deepseek-v4.1-flash', 'hy4free'],
+      fallbackOnQuotaOf: () => true,
+    })
+    mockTurn((c, index) => {
+      if (index === 1) { c.fail(-32003, 'quota exceeded'); return }
+      c.p.update(message('恢复了'))
+      c.settle()
+    })
+    const chunks = await step(h.adapter, makeOptions('s1', { model: 'deepseek-v4.1-flash' }))
+    expect(chunks.some(c => c.includes('恢复了'))).toBe(true)
+    expect(h.spawns()).toBe(2)
+    const argvOf = (index: number): string[] => mockedSpawn.mock.calls[index]?.[1] as string[]
+    expect(argvOf(0)[argvOf(0).indexOf('--model') + 1]).toBe('deepseek-v4.1-flash')
+    expect(argvOf(1)[argvOf(1).indexOf('--model') + 1]).toBe('hy4free')
+  }, 15_000)
+
+  it('配额降级关闭 → 不换模型,直接失败', async () => {
+    const h = makeAdapter({}, { ...FAST, maxAttempts: 2, retryDelayMs: 20 }, undefined, undefined, {
+      modelOf: () => 'deepseek-v4.1-flash',
+      modelFallbacksOf: () => ['deepseek-v4.1-flash', 'hy4free'],
+      fallbackOnQuotaOf: () => false,
+    })
+    mockTurn((c) => { c.fail(-32003, 'quota exceeded') })
+    const chunks = await step(h.adapter, makeOptions('s1', { model: 'deepseek-v4.1-flash' }))
+    expect(chunks.at(-1)).toContain('"kind":"error"')
+    expect(h.spawns()).toBe(1)
   }, 15_000)
 
   it('CLI 进程中途退出 → finish error 交付调用方(已有产出则不再重启)', async () => {

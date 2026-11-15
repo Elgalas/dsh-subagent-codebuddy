@@ -96,19 +96,23 @@ describe('adapter.resolveModel', () => {
     expect(info.inputModalities).toEqual(['text', 'image'])
   })
 
-  it('surface 恒声明 text+image(入口门放行);真实能力经 imageCapableOf 保留', async () => {
+  it('surface 声明按能力:目录缺项时以 models.json 为准,不再恒报 text+image', async () => {
+    // 2026-11-14 修正:旧行为是"一律声明 text+image 好让入口门放行带图消息",
+    // 后果是纯文本模型在选择器里也显示成多模态(用户报障:模态定义错误)。
+    // 现在 catalog 有该模型时按目录(精确 id 模态表 + 平台 flag 否决)判定,
+    // 目录缺项时回落到 models.json 的用户声明;两者都没有 → 只声明 text。
     const capable = makeAdapter(() => 'deepseek-v4.1-flash', fakeCapabilities({ 'deepseek-v4.1-flash': true }))
     expect((await capable.resolveModel('codebuddy', 'deepseek-v4.1-flash')).inputModalities).toEqual(['text', 'image'])
     expect(capable.imageCapableOf('deepseek-v4.1-flash')).toBe(true)
 
     const textOnly = makeAdapter(() => 'glm-5.3', fakeCapabilities({ 'deepseek-v4.1-flash': true }))
-    expect((await textOnly.resolveModel('codebuddy', 'glm-5.3')).inputModalities).toEqual(['text', 'image'])
+    expect((await textOnly.resolveModel('codebuddy', 'glm-5.3')).inputModalities).toEqual(['text'])
     expect(textOnly.imageCapableOf('glm-5.3')).toBe(false)
   })
 })
 
 describe('adapter.listModels', () => {
-  it('目录 = CLI ids ∪ 配置默认模型,模态恒 text+image,描述带真实能力后缀', async () => {
+  it('目录 = CLI ids ∪ 配置默认模型,描述与模态按能力后缀', async () => {
     mockedSpawn.mockImplementation(() => fakeHelpProcess(HELP_TEXT) as never)
     const adapter = makeAdapter(() => 'custom-model', fakeCapabilities({ 'glm-5.3': true }))
     const models = await adapter.listModels('codebuddy')
@@ -116,7 +120,9 @@ describe('adapter.listModels', () => {
     expect(models.every(m => m.provider === 'codebuddy')).toBe(true)
     expect(models[0]?.description).toBe('CodeBuddy (ACP) model glm-5.3 · 支持图片输入')
     expect(models[1]?.description).toBe('CodeBuddy (ACP) model deepseek-v4-flash · 仅文本')
-    for (const m of models) expect(m.inputModalities).toEqual(['text', 'image'])
+    // 只有 models.json 声明了图片能力的 glm-5.3 才是多模态,其余一律仅文本。
+    expect(models[0]?.inputModalities).toEqual(['text', 'image'])
+    for (const m of models.slice(1)) expect(m.inputModalities).toEqual(['text'])
   })
 
   it('成功结果带 TTL 缓存:第二次调用不重新 spawn', async () => {

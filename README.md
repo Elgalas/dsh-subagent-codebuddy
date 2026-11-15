@@ -5,6 +5,16 @@
 > 主代理可直接在模型选择器选用 CodeBuddy 模型，通用 `subagent` 工具也可委派 CodeBuddy 子代理。
 > 完全遵循 dsh 官方扩展机制，零源码改动。
 
+## 0.1.3 更新要点
+
+- **模型目录改用 CodeBuddy 实时目录**：展示名带积分倍率（如 `DeepSeek-V4.1-Flash · x0.11`），逐模型给出上下文窗口、可用推理档位与输入模态；
+  上游 `supportsImages` 是平台投放标志（几乎全 `true`），模态改按模型精确 id 判定，未确认的按文本。
+- **设置页（「插件」页 → CodeBuddy）**：模型优先顺序（添加/上下移动/删除）、子代理默认思考强度、配额降级开关。
+- **配额降级**：429 且本回合零产出时自动换到顺序里的下一个模型，重开 CodeBuddy 会话重试本回合（换模型不能 resume）。
+- **与官方子代理对齐（PTC）**：PTC 会话里模型只能直接调 `run_code`，桥现在把它作为传输工具暴露，注入尾注/工具路由说明按**真实工具面**生成（不再硬编码 bash/read 名单）。
+- **失败收尾消息修复**：补写 `assistant/message` 时带上 `surfaceOp: 'append'`（dsh 0.2.2 对 surface-eligible 事件的强校验），判据改为「本回合是否已有 `assistant/message`」；硬失败时主代理能看到失败原因，而不是只有一句 `It left no closing message`。
+- **设置卡注册位点修正**：从 `plugins.item`（内置条目槽）改到 `plugins.bundle.config` + `plugins.row.config`，第三方 bundle 才会在「插件」页渲染出配置卡。
+
 ## 一、这是什么
 
 `codebuddy` 是一位**完整的模型供应商**：
@@ -13,8 +23,8 @@
 | --- | --- |
 | **主代理模型** | 模型选择器出现 CodeBuddy 分组（模型目录 = `codebuddy --help` 解析 ∪ 配置默认模型），选中后该轮由 CodeBuddy CLI 全权驱动 |
 | **子代理 provider** | 通用 dsh `subagent` 工具可传 `provider: codebuddy` 委派（配合 `subagent-model-selection` 设置）；进程内 child agent、可并行、`send_message` 续聊 |
-| **模型目录** | adapter 实现 `listModels()`（带缓存、永不抛错），主选择器与 `list_subagent_models` 共用 |
-| **推理强度** | CLI `--effort` 档位（low / medium / high / xhigh / max / ultracode）暴露到 dsh 模型选择器；子代理可用 `reasoning_effort` 参数指定 |
+| **模型目录** | adapter 实现 `listModels()`：读 CodeBuddy 实时目录（`~/.codebuddy/local_storage/*.info`），展示名带积分倍率与模态，逐模型给出上下文窗口与推理档位；主选择器与 `list_subagent_models` 共用，永不抛错 |
+| **推理强度** | 每模型按目录暴露实际可用档位（`supportedEfforts`，缺省 `defaultEffort` 由设置页 `defaultEffort` 决定，未配置时不传 `--effort`）；子代理可用 `reasoning_effort` 参数覆盖 |
 | **图片输入/读取** | 图片以 ACP 原生 `image` 内容块随 prompt 发送。文件可经 CLI 原生 `Read` 读取，也可以使用宿主提供的 `read_image`。AGY 转述工具在宿主有提供时可作备选。历史种子与子代理转录通过 CodeBuddy blob 转换图片。 |
 | **子代理可视化** | codebuddy 轮里的 `Agent` 委派镜像为 **dsh 子会话**（`parentSession` 血缘 + `subagent/descriptor`），侧边栏可点开完整转录（消息/工具/思考/任务），运行中近实时跟随 |
 | **任务/todo** | 走 dsh 原生 `todo_write`（工具桥一等公民，主轮与子代理会话都复用 dsh 的 TodoPanel 渲染）；CLI 侧 `TaskCreate`/`TaskUpdate` 已随内置工具禁用，`todo-bridge` 保留作旧会话重放兼容 |
@@ -55,7 +65,7 @@
 
 ### 安装插件
 
-`@flg1217/dsh-mcp-tool-server` 由宿主 profile 提供。使用包含 dsh 0.2.2 工具准入修复的共享包 `0.1.2`。先安装共享包，再把 CodeBuddy 插件装入同一个 profile。用桌面版时，在「插件」页面按此顺序添加两个 GitHub 来源。
+`@flg1217/dsh-mcp-tool-server` 由宿主 profile 提供。使用包含 dsh 0.2.2 工具准入修复的共享包 `0.1.3`。先安装共享包，再把 CodeBuddy 插件装入同一个 profile。用桌面版时，在「插件」页面按此顺序添加两个 GitHub 来源。
 
 从 `0.1.1` 迁移时，更新 CodeBuddy 插件后移除同一 profile 里的旧共享包 `@flg1217/dsh-mcp`。如果同一 profile 还有插件依赖旧包，请先迁移那些插件，避免新旧桥同时启用。
 
@@ -67,8 +77,8 @@ dsh plugin --profile web add github:Elgalas/dsh-subagent-codebuddy#master
 使用本地安装包时：
 
 ```bash
-dsh plugin --profile web add ./flg1217-dsh-mcp-tool-server-0.1.2.tgz
-dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.2.tgz
+dsh plugin --profile web add ./flg1217-dsh-mcp-tool-server-0.1.3.tgz
+dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.3.tgz
 ```
 
 从源码目录安装时，pnpm 可能创建本地链接，导致插件从源码目录解析依赖，找不到装在 profile 里的共享包。更新现有的链接安装时，先从该 profile 移除旧的 CodeBuddy 插件，再安装打包产物。
@@ -109,9 +119,21 @@ dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.2.tgz
 
 ### 动态模型选择
 
-- adapter `listModels()`：从 `codebuddy --help` 实时解析支持列表（成功缓存 10 分钟），
-  配置默认模型始终并入目录，CLI 不可用时回退配置模型、provider 仍可选择。
+- adapter `listModels()`：优先读 CodeBuddy 实时目录（`~/.codebuddy/local_storage/entry_*.info`，30 秒命中缓存），
+  展示名形如 `DeepSeek-V4.1-Flash · x0.11`，并给出该模型的 `contextWindow`、可用推理档位与输入模态；
+  实时目录缺失时才回退 `codebuddy --help` 解析 + `product.json`，CLI 不可用时回退配置模型、provider 仍可选择。
+- 模态按**模型精确 id** 判：上游 `supportsImages` 是平台投放标志（几乎全 true），不能当模型原生能力；未确认的 id 一律按文本。
 - opt-in 的 `list_codebuddy_models` 工具提供同样数据的文本视图。
+
+### 模型优先顺序与配额降级
+
+设置页在侧边栏「插件」页的 CodeBuddy 条目里（配置写入 profile 的 `subagent-codebuddy` 段）：
+
+- **模型优先顺序**：`models` 数组，首位即默认模型；子代理委派未显式指定 `model` 时用它。
+- **子代理默认思考强度**：`defaultEffort`，委派未带 `reasoning_effort` 时生效；`""` 表示不传 `--effort`（用 CLI 默认）。
+- **配额降级**：`fallbackOnQuota`（默认开）。仅当失败分类是 `quota`（429/限流/余额不足）**且本回合零产出**时才降级到顺序里的下一个模型；
+  换模型必然重开 CodeBuddy 会话（ACL 会话与模型绑定），因此 CLI 侧的对话上下文会重来，dsh 子会话里的消息不受影响。
+- 降级只在当前回合内发生，不会永久改写 `models` 顺序。
 
 ### 配置项
 
@@ -120,6 +142,9 @@ dsh plugin --profile web add ./flg1217-dsh-subagent-codebuddy-0.1.2.tgz
 | `command` | `codebuddy` | 可执行文件（Windows 自动解析 npm cmd-shim → `node <真实CLI>`） |
 | `model` | `deepseek-v4-flash` | 默认 CodeBuddy 模型 ID（子代理委派缺省值；主代理选择器另选） |
 | `permissionMode` | `bypassPermissions` | `--permission-mode`：CodeBuddy 工具调用自动放行 |
+| `models` | `[]` | 模型优先顺序（首位即默认）。配额失败时按此顺序自动降级，见 §二「模型优先顺序与配额降级」 |
+| `defaultEffort` | `""` | 子代理默认思考强度（`""` = 不传 `--effort`）；可选值随目录，常见 `low/medium/high/xhigh/max` |
+| `fallbackOnQuota` | `true` | 配额/限流（429）且本回合零产出时，自动换到 `models` 里的下一个模型并重开 CodeBuddy 会话 |
 | `extraArgs` | `[]` | 追加的 CodeBuddy 参数 |
 | `providerName` | `codebuddy` | LLM provider 路由名 |
 | `toolName` | `subagent_codebuddy` | opt-in 工具名 |

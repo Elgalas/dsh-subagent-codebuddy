@@ -32,6 +32,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session';
 import { ConversationStore } from './conversations.js';
 import type { AcpTimeouts } from './acp.js';
 import type { ModelCapabilityIndex } from './model-capabilities.js';
+import type { CatalogSource } from './catalog.js';
 /**
  * 会话中最后一个已打开(尚无配对 step/end)的 turn/step。
  *
@@ -53,6 +54,15 @@ export interface CodebuddyAdapterOptions {
     prefixArgs: string[];
     /** 读取当前默认模型(调用时求值,设置面板改默认模型后对新请求实时生效)。 */
     modelOf: () => string;
+    /**
+     * 模型优先顺序(设置里的完整列表,第一项是默认模型)。配额/限流失败且
+     * 本回合尚无产出时,回合泵按此顺序换下一个模型重开 CLI 会话。
+     */
+    modelFallbacksOf?: () => readonly string[];
+    /** 配额/限流失败时是否允许自动换模型(默认 true)。 */
+    fallbackOnQuotaOf?: () => boolean;
+    /** 子代理默认思考强度('' = 不传 `--effort`)。 */
+    defaultEffortOf?: () => string;
     /** 传给 `--permission-mode` 的权限模式。 */
     permissionMode: string;
     /** 追加的额外 CodeBuddy 参数。 */
@@ -63,7 +73,6 @@ export interface CodebuddyAdapterOptions {
      */
     bridgeMode?: 'mcp' | 'delegate';
     bridgeModeOf?: () => 'mcp' | 'delegate';
-    admittedToolsOf?: (sessionId: string) => ReadonlySet<string> | undefined;
     /** 动态空闲超时预算(可选,默认见 {@link DEFAULT_ACP_RUN_TIMEOUTS})。 */
     timeouts?: AcpTimeouts;
     /** 静默失败自动重试次数(默认 2:首次 + 1 次续跑)。 */
@@ -81,6 +90,11 @@ export interface CodebuddyAdapterOptions {
      * 测试注入假索引,避免读真实 `~/.codebuddy`)。
      */
     capabilities?: ModelCapabilityIndex;
+    /**
+     * 模型目录来源(名册/倍率/窗口/档位/原生模态)。默认读 CLI 实时目录,
+     * bundled `product*.json` 只作离线兜底;测试注入固定快照。
+     */
+    catalog?: CatalogSource;
 }
 /**
  * CodeBuddy 模型适配器。stream() 每次调用:
@@ -119,8 +133,28 @@ export declare class CodebuddyLlmAdapter extends LlmAdapter {
     private unmarkForwarded;
     /** 模型图片能力索引(`models.json` 的 `supportsImages`;未知按仅文本)。 */
     private readonly capabilities;
+    /** 模型目录来源(实时名册/倍率/窗口/档位/模态)。 */
+    private readonly catalog;
     constructor(ctx: Context, options: CodebuddyAdapterOptions);
-    /** 该模型是否原生支持图片输入(未登记/字段缺失按 false)。 */
+    /**
+     * 该模型是否原生支持图片输入。
+     *
+     * 以目录的原生模态表为准(精确 id + 平台否定票),`models.json` 只在目录
+     * 缺项时兜底——平台 `supportsImages` 对纯文本模型也常为 true,不能直接采信。
+     * @param model - 模型 id。
+     * @returns 是否可按多模态引导。
+     */
+    /**
+     * 模型本 step 真正能直接调用的工具面。
+     *
+     * 来源只能是 `GenerateOptions.tools` —— 它是 dsh 交给 provider 的那份声明,
+     * PTC 会话里就是 `[run_code]`。**不能用注册表**(`tools.schemas()`):注册表
+     * 里没有执行器传输工具,拿它当工具面会让桥/尾注描述一组模型其实直接调不到
+     * 的工具(旧会话的 `unknown tool "read"` 连跪就是这个口径错误)。
+     * @param options - 本 step 的模型请求。
+     * @returns 该请求的工具声明;无工具时为空数组。
+     */
+    private surfaceOf;
     imageCapableOf(model: string): boolean;
     /**
      * 读图引导:读图走 **CLI 原生 Read**(`--tools` 白名单固定放行;CLI 内置
@@ -172,11 +206,16 @@ export declare class CodebuddyLlmAdapter extends LlmAdapter {
         name: string;
     };
     /**
-     * 主模型选择器的模型目录:`codebuddy --help` 解析出的 id ∪ 设置里的默认模型。
+     * 主模型选择器的模型目录:目录里的可选用名册(实时目录 `agents[].models`,
+     * 离线时 bundled 兜底)∪ 设置里的默认模型。
      *
-     * 目录路径会在客户端每次拉取时被调用,且 CLI 可能缺失/挂起——因此
-     * 异步 spawn + 超时、成功缓存 10 分钟、失败缓存 60 秒、并发合并,
-     * 并且**永不抛错**:CLI 不可用时回退到配置模型,保证 provider 仍可选择。
+     * 名称带积分倍率(`DeepSeek-V4.1-Flash · x0.11`)——与 dsh-connect-workbuddy
+     * 同口径:宿主原样渲染 `name`,倍率不进 description、不另设字段。description
+     * 保留 `CodeBuddy (ACP) model <id> · 支持图片输入|仅文本`,因为子代理模型
+     * 目录(list_subagent_models)把 description 当唯一通道。
+     *
+     * 目录路径会被客户端每次拉取时调用,CLI 可能缺失/挂起——因此异步 spawn
+     * 只用于扩展 id、成功缓存 10 分钟、失败缓存 60 秒、并发合并,**永不抛错**。
      */
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
 }

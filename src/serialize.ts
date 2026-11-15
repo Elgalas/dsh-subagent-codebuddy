@@ -32,7 +32,23 @@ export const CONTINUE_PROMPT = '继续完成之前未完成的任务,持续推�
  *   工具结果);AGY 转述仅兜底(read_image 缺席)或用户显式要求。
  * @returns 工具路由说明全文。
  */
-function toolRoutingNote(bridgeMode: 'mcp' | 'delegate', guidance: ImageReadGuidance): string {
+function toolRoutingNote(
+  bridgeMode: 'mcp' | 'delegate',
+  guidance: ImageReadGuidance,
+  ptcOnly = false,
+): string {
+  if (ptcOnly) {
+    // PTC:工具面只有 run_code,任何"用 mcp__dsh__xxx"的说法都会让模型直接
+    // 调不存在的工具(旧会话根因)。这里只给程序内 SDK 的说法。
+    return [
+      '[工具路由(本环境强制)]',
+      'CLI 原生工具(含 Bash/PowerShell/Read/Edit/Write/NotebookEdit/Glob/Grep)已**全部禁用**;本会话是 dsh 的 PTC 预设,唯一可直接调用的是 `mcp__dsh__run_code`(输入 `{code, description}`)。',
+      'dsh 工具在程序内通过 `tools` 调用(tools.read / tools.bash / tools.edit / tools.write / tools.glob / tools.grep / tools.subagent……),它们受 dsh 审批与沙箱约束、进会话日志与后台任务面板;直接按名字调其他工具会被判未知工具并使回合失败。',
+      guidance === 'native' || guidance === 'agy'
+        ? '读图片在程序里用 tools.read_image({ref}) 取,不要假设自己看不到图。'
+        : '读图片:本会话没有可用的读图工具——需要读图时如实告知用户。',
+    ].join('\n')
+  }
   const target = bridgeMode === 'mcp'
     ? '对等能力一律用 MCP 工具(mcp__dsh__bash、mcp__dsh__pwsh、mcp__dsh__read、mcp__dsh__read_image、mcp__dsh__edit、mcp__dsh__write、mcp__dsh__glob、mcp__dsh__grep)'
     : '对等能力一律用 dsh 前缀版本(dsh_bash、dsh_pwsh、dsh_read、dsh_read_image、dsh_edit、dsh_write、dsh_glob、dsh_grep)'
@@ -65,11 +81,12 @@ export function systemInstructionsText(
   updated = false,
   bridgeMode: 'mcp' | 'delegate' = 'delegate',
   guidance: ImageReadGuidance = 'native',
+  ptcOnly = false,
 ): string {
   const header = updated
     ? 'System instructions (updated — 以本版为准,忽略早前版本):'
     : 'System instructions:'
-  return `${header}\n${system}\n\n${toolRoutingNote(bridgeMode, guidance)}`
+  return `${header}\n${system}\n\n${toolRoutingNote(bridgeMode, guidance, ptcOnly)}`
 }
 
 /** 序列化结果:prompt 文本 + ACP 原生图片内容块(base64)。 */

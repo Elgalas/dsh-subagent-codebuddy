@@ -30,6 +30,7 @@ import { registerCodebuddySettings, resolveSpawnableCommand } from './settings.j
 import type { EffectiveCodebuddySettings } from './settings.js'
 import { registerCodebuddyModelsRoute } from './models-route.js'
 import { createModelCapabilityIndex } from './model-capabilities.js'
+import { createCatalogSource, productFilesNear, readBundledCatalog, readLiveCatalog } from './catalog.js'
 import { registerDshMcpServer } from '@flg1217/dsh-mcp-tool-server'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { sweepStaleMcpConfigs } from './mcp-config.js'
@@ -68,6 +69,15 @@ export interface Config {
   command: Volatile<string>
   /** 默认 CodeBuddy 模型 ID,默认 `deepseek-v4.1-flash`。 */
   model: Volatile<string>
+  /**
+   * 模型优先顺序(第一个即默认模型)。配额/限流失败时按顺序降级到下一个,
+   * 见 {@link Config.fallbackOnQuota}。空数组 = 只用 {@link Config.model}。
+   */
+  models: Volatile<string[]>
+  /** 子代理默认思考强度('' = 不传 `--effort`;可选 minimal/low/medium/high/xhigh/max)。 */
+  defaultEffort: Volatile<string>
+  /** 配额/限流失败时自动换到下一个可用模型(默认开)。 */
+  fallbackOnQuota: Volatile<boolean>
   /** 传给 `--permission-mode` 的权限模式,默认 `bypassPermissions`(自动放行)。 */
   permissionMode: Volatile<string>
   /** 是否注册 opt-in 委派工具(默认关闭)。 */
@@ -124,6 +134,15 @@ export const Config: z<CodebuddyConfigInput, Config> = z.object({
     .description('codebuddy 可执行文件命令(默认 codebuddy)').volatile(),
   model: z.string().default('deepseek-v4.1-flash')
     .description('子代理使用的默认模型(委派时可传 model 参数覆盖)').volatile(),
+  models: z.array(z.string()).default([])
+    .description('模型优先顺序(第一项即默认;配额/限流失败时按顺序降级)。留空则只用 model')
+    .volatile(),
+  defaultEffort: z.string().default('')
+    .description('子代理默认思考强度(minimal/low/medium/high/xhigh/max;留空 = 不传 --effort)')
+    .volatile(),
+  fallbackOnQuota: z.boolean().default(true)
+    .description('配额/限流失败且本回合尚无产出时,自动换到优先顺序里的下一个模型重试')
+    .volatile(),
   permissionMode: z.string().default('bypassPermissions')
     .description('--permission-mode:子代理工具调用自动放行').volatile(),
   registerSubagentTools: z.boolean().default(false)
@@ -173,13 +192,27 @@ export function apply(ctx: Context, config: Config): void {
   // 活引用实时读取(空串视为未配置,回退内建默认;面板清空字段时不能因
   // '' 覆盖兜底值导致 spawn ENOENT)。返回的 thunk 供 adapter / 路由实时读。
   const filled = (value: string): string | undefined => value.trim().length > 0 ? value : undefined
-  const settingsOf = (): EffectiveCodebuddySettings => ({
-    command: filled(config.command.get()) ?? 'codebuddy',
-    model: filled(config.model.get()) ?? 'deepseek-v4.1-flash',
-    permissionMode: filled(config.permissionMode.get()) ?? 'bypassPermissions',
-    registerSubagentTools: config.registerSubagentTools.get(),
-    bridgeMode: config.bridgeMode.get(),
-  })
+  const settingsOf = (): EffectiveCodebuddySettings => {
+    // 优先顺序可以为空(用户只配了单模型):空表时回退到 model 一项。
+    // 非空时 `models[0]` 即默认模型——设置页把两者同步写,但手改 patch
+    // 只写 models 也应生效,所以这里以 models 为准。
+    const configured = config.models.get()
+      .map(id => id.trim())
+      .filter(id => id.length > 0)
+    const models = configured.length > 0
+      ? configured
+      : [filled(config.model.get()) ?? 'deepseek-v4.1-flash']
+    return {
+      command: filled(config.command.get()) ?? 'codebuddy',
+      model: models[0]!,
+      models,
+      defaultEffort: config.defaultEffort.get().trim(),
+      fallbackOnQuota: config.fallbackOnQuota.get(),
+      permissionMode: filled(config.permissionMode.get()) ?? 'bypassPermissions',
+      registerSubagentTools: config.registerSubagentTools.get(),
+      bridgeMode: config.bridgeMode.get(),
+    }
+  }
   registerCodebuddySettings(ctx, settingsOf)
   const eff = settingsOf()
   const resolved = resolveSpawnableCommand(eff.command)
@@ -188,36 +221,34 @@ export function apply(ctx: Context, config: Config): void {
   // 目录条目文案、设置卡模型列表共用同一份,避免多处各读一次。
   const capabilities = createModelCapabilityIndex()
 
+  // 模型目录(名册/倍率/窗口/档位/原生模态):适配器与设置卡共用一份。
+  // 实时目录优先,bundled product*.json 只做离线兜底。
+  const catalog = createCatalogSource({
+    live: () => readLiveCatalog(),
+    bundled: () => readBundledCatalog(productFilesNear([...resolved.args, resolved.command])),
+  })
+
   // 设置面板的模型列表路由:插件卡槽位拿不到会话级 remote,发现只能自建
   // (围栏与 /api 网关行为一致,见 models-route.ts 模块头)。
-  ctx.effect(() => registerCodebuddyModelsRoute(ctx, () => settingsOf().command, capabilities))
+  ctx.effect(() => registerCodebuddyModelsRoute(ctx, () => settingsOf().command, catalog))
 
   // LLM provider 路由:主代理选择与子代理委派的推理都走 CodeBuddy。
   // /compact 转发与 adapter 共用同一会话映射(acpId → dsh 会话)。
   const conversations = new ConversationStore()
-  const admittedTools = new WeakMap<object, ReadonlySet<string>>()
-  ctx.inject(['tools', 'systemPrompt'], (child) => {
-    child.on('system-prompt/assemble', (_presentation, assembly, next) => {
-      const { scope, toolSet } = assembly
-      if (scope !== undefined && typeof scope === 'object' && toolSet !== undefined) {
-        admittedTools.set(scope, new Set(child.tools.schemas(scope, toolSet).map(tool => tool.name)))
-      }
-      return next()
-    })
-  })
   ctx.llm.registerAdapter([providerName], new CodebuddyLlmAdapter(ctx, {
     command: resolved.command,
     prefixArgs: resolved.args,
     modelOf: () => settingsOf().model,
+    // 配额降级:子代理回合零产出失败(quota)时按优先顺序换下一个模型重试。
+    modelFallbacksOf: () => settingsOf().models,
+    fallbackOnQuotaOf: () => settingsOf().fallbackOnQuota,
+    defaultEffortOf: () => settingsOf().defaultEffort,
     permissionMode: eff.permissionMode,
     extraArgs: config.extraArgs,
     bridgeModeOf: () => settingsOf().bridgeMode,
-    admittedToolsOf: (sessionId) => {
-      const agent = ctx.get('agents')?.get(sessionId as SessionId)
-      return agent === undefined ? undefined : admittedTools.get(agent)
-    },
     store: conversations,
     capabilities,
+    catalog,
     // 静默长工具硬顶(分钟 → 毫秒;0 = 关闭)。看门狗超顶时 cancel+强杀,走
     // stall 重试自动续跑——防止 CLI 卡死时进程泄漏、子会话回合悬空。
     // 尾巴窗口(秒/分钟 → 毫秒;0 = 关闭)见 Config.tailQuietSeconds。
@@ -266,7 +297,11 @@ export function apply(ctx: Context, config: Config): void {
     return {
       provider: 'spawn',
       toolName,
-      agentOptions: () => ({ provider: providerName, model: settingsOf().model }),
+      agentOptions: () => ({
+        provider: providerName,
+        model: settingsOf().model,
+        ...(settingsOf().defaultEffort === '' ? {} : { reasoningEffort: settingsOf().defaultEffort }),
+      }),
       description:
         'Delegate a self-contained task to a CodeBuddy subagent (a separate process running Tencent CodeBuddy with its own tools) '
         + 'to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume '

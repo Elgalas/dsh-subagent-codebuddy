@@ -32,7 +32,7 @@ import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { AcpTimeouts } from './acp.js';
 import type { TodoListState } from './todo-bridge.js';
 import type { AttachmentsSaveFace } from './tool-image.js';
-import type { DshToolRunResult } from '@flg1217/dsh-mcp-tool-server';
+import type { DshSurfaceTool, DshToolRunResult } from '@flg1217/dsh-mcp-tool-server';
 /**
  * 泵释放后继续盯一条迟到结果(独立于泵的一次性订阅)。
  *
@@ -68,7 +68,15 @@ export interface PumpSessionFace {
         type: string;
         data?: unknown;
     }[];
-    append?: (type: string, data: unknown) => unknown;
+    /**
+     * 写会话事件。`opts.surfaceOp` 对 **surface-eligible** 事件(如
+     * `assistant/message`)是**必填**:dsh-session 的 `Session.append` 在缺省时抛
+     * `session event "…" is surface-eligible and requires a surfaceOp marker`
+     * (实测 0.2.2-rc.3),而 pump 的补写调用过去被 `try/catch {}` 静默吞掉。
+     */
+    append?: (type: string, data: unknown, opts?: {
+        surfaceOp?: 'append';
+    }) => unknown;
 }
 /** 泵的宿主依赖(由 adapter 提供;避免与 adapter.ts 形成运行时循环)。 */
 export interface PumpHost {
@@ -81,7 +89,11 @@ export interface PumpHost {
      * MCP server、不发 delegate 注册;delegate = 旧 DelegateTool 通道。
      */
     bridgeMode?: 'mcp' | 'delegate';
-    admittedTools?: ReadonlySet<string>;
+    /**
+     * 模型可见工具面(`assembly.tools` 投影;含 PTC 的 run_code)。
+     * 桥名单、尾注、CLI `--tools` 策略都以它为准。
+     */
+    toolSurface?: readonly DshSurfaceTool[];
     /** 推理强度(--effort;未选则不传,保持 CLI 默认)。 */
     reasoningEffort?: string;
     timeouts?: AcpTimeouts;
@@ -92,6 +104,16 @@ export interface PumpHost {
     /** dsh 会话 id(泵的键,也是回放工具注册的 scope)。 */
     dshSessionId: string;
     model: string;
+    /**
+     * 当前 attempt 的模型(缺省用 {@link PumpHost.model})。配额降级时由
+     * adapter 的模型游标推进,`runAttempt` 每次重读。
+     */
+    modelOf?: () => string;
+    /**
+     * 配额/限流失败时前进到下一个模型;返回 false 表示没有更多模型。
+     * 只有「零产出失败」才会被询问(见 `failRun`)。
+     */
+    advanceModel?: () => boolean;
     /** 读图引导:按当前模型是否支持图片输入分流(缺省 native,保持旧行为)。 */
     imageGuidance?: ImageReadGuidance;
     cwd: string;
@@ -238,14 +260,26 @@ export declare function dshDelegationNote(guidance: ImageReadGuidance): string;
  * 换成 CLI 呈现的 `mcp__dsh__<工具名>`(参数走各工具的 MCP schema,不再有
  * toolId 中转),并去掉 DelegateTool 形态专属条款。
  */
-export declare function mcpDelegationNote(guidance: ImageReadGuidance): string;
+export declare function mcpDelegationNote(guidance: ImageReadGuidance, surface?: readonly DshSurfaceTool[]): string;
+/**
+ * PTC 会话的尾注:模型唯一的直接工具是 `mcp__dsh__run_code`。
+ *
+ * 为什么单列:官方子代理继承父会话的 `ops-ptc` 预设时,host 只允许直接调用
+ * `run_code`,其余工具(即使桥暴露了)一旦被直接调用就抛 ToolNotFoundError。
+ * 旧实现的尾注硬编码 `mcp__dsh__bash / read / edit` 清单,模型照着调 → CLI
+ * 判 ModelBehaviorError,回合无收尾消息地死掉。这里改成只讲 run_code,并把
+ * 程序内 SDK 的调用形态写清楚(`tools.<工具名>`),与 `tools:sdk` 段落一致。
+ * @param guidance - 读图引导(仅用于说明读图走哪条路)。
+ * @returns 完整的 PTC 尾注文本。
+ */
+export declare function ptcDelegationNote(guidance: ImageReadGuidance): string;
 /**
  * 按桥接模式取 prompt 尾注(dsh 运行环境说明)。
  * @param bridgeMode - 工具桥接模式(delegate 用 `dsh_` 前缀,mcp 用 `mcp__dsh__`)。
  * @param guidance - 读图引导(按当前模型是否支持图片输入分流)。
  * @returns 以空行开头的尾注文本。
  */
-export declare function promptTailFor(bridgeMode: 'mcp' | 'delegate' | undefined, guidance?: ImageReadGuidance): string;
+export declare function promptTailFor(bridgeMode: 'mcp' | 'delegate' | undefined, guidance?: ImageReadGuidance, surface?: readonly DshSurfaceTool[]): string;
 /** 重启跨 attempt 保留的执行状态(重试是同一任务的延续,已学到的间隔不丢)。 */
 export interface PumpStepState {
     mirroredCalls: Set<string>;
@@ -261,7 +295,7 @@ export declare class TurnPump {
     private acpSessionId;
     private capturing;
     private readonly deps;
-    private admittedTools;
+    private toolSurface;
     private readonly to;
     private readonly maxAttempts;
     private readonly retryDelayMs;
@@ -270,6 +304,10 @@ export declare class TurnPump {
     private readonly usageGraceMs;
     private readonly stepState;
     private attempts;
+    /** 当前 attempt 使用的模型(配额降级后跟着换;`deps.modelOf` 每次重读)。 */
+    private model;
+    /** 本回合的失败分类(`failure.ts` 的 category),降级判定用。 */
+    private failureCategory;
     /**
      * 尝试代次令牌:restart 立即使其失效(与 attempts 不同——attempts 要等
      * 下一次 runAttempt 才 +1,而旧连接的挂起请求会在 restart 之后立刻迟到
@@ -402,7 +440,10 @@ export declare class TurnPump {
     constructor(deps: PumpHost, signal: AbortSignal | undefined, stepState: PumpStepState);
     /** 回放工具 → 当前泵(未在跑/已收尾时为 undefined)。 */
     static forSession(sessionId: string): TurnPump | undefined;
-    updateAdmittedTools(tools: ReadonlySet<string> | undefined): void;
+    /** 续段时刷新工具面(同一回合内 tools 可能变化,如计划模式切换)。 */
+    updateToolSurface(surface: readonly DshSurfaceTool[] | undefined): void;
+    /** 工具面上的裸工具名(桥/delegate 过滤与尾注共用)。 */
+    private get surfaceNames();
     /** 回合是否已被调用方中止(abort 交给 loop 的中断语义收尾)。 */
     private get aborted();
     /**
@@ -433,26 +474,28 @@ export declare class TurnPump {
      * 子代理会话的「临终遗言」:零产出失败时补一条 assistant 文本,让失败原因
      * 随 dsh 的结算通知回到主代理。
      *
-     * **为什么必须补**(2026-09-21 实测):dsh 的通知构造
-     * (`subagent/src/continuation-messages.ts`)只带一句通用结论 + 子代理**最后一
-     * 条 assistant 消息**;而硬失败(401/配额/传输错)时 agent-loop 直接
-     * `throw LlmError`,不产生 assistant 消息 → 主代理只收到
-     * "Background subagent X failed before it finished. / It left no closing
-     * message.",**失败原因整条丢失**(用户报障:子代理错误完全没反馈)。
-     * 补写后 `AssistantOutputFold` 会选中它,通知里出现 "Its closing message:
-     * CodeBuddy 中断:…401…"。
-     *
-     * **两道闸门**:
-     * - 只在**子会话**(header.parentSession 存在)补:主会话的失败 UI 本来就有
-     *   "本轮运行失败"卡,补一条"模型没说过的话"只会污染转录。
-     * - 只在**本回合零文本产出**时补:`hasText` 为真时 agent-loop 的
-     *   `assistant/attempt` 流文本已经是临终遗言,而 `AssistantOutputFold`
-     *   优先选 `assistant/message`——补写会把它顶掉。
+     * 实现与全部取证注释见 `closing-message.ts`(抽成纯函数以便用真 `Session`
+     * 写回归测试:过去 `try/catch {}` 把"缺 surfaceOp"吞成了静默 no-op)。
      * @param error - 本回合的失败(已含可读原因,如 failure.ts 分类后的文案)。
      */
     private appendFailureClosingMessage;
+    /**
+     * 配额/限流失败 → 换下一个模型。
+     *
+     * 只在「本回合零产出」时允许:已经流出的文本/已发起的工具调用都属于
+     * 已完成的部分,换模型重来会重复执行工具、也会让用户看到重复内容。
+     * 调用方可通过设置关掉(modelFallbacks 为空或 fallbackOnQuota=false 时
+     * 没有 `advanceModel`)。
+     * @returns 是否已切到新模型(调用方据此重启)。
+     */
+    private switchModelOnQuota;
     /** 重启资格:失败可续跑、仍是首段、本回合无任何产出、还有重试次数。 */
     private canRestart;
+    /**
+     * 重开一次 attempt。
+     * @param fresh - 丢弃 CodeBuddy 会话与续接映射(换模型时必须:CLI 会话与
+     * 模型绑定,带旧会话 resume 会重放旧模型历史)。
+     */
     private restart;
     /** 补一次「到期即判定」的定时器(收段宽限/尾巴静默预算)。 */
     private armCheck;

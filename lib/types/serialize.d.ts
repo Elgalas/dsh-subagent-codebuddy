@@ -26,7 +26,7 @@ export declare const CONTINUE_PROMPT = "\u7EE7\u7EED\u5B8C\u6210\u4E4B\u524D\u67
  * @param guidance - 读图引导(按当前模型是否支持图片输入分流)。
  * @returns 可直接作为 prompt 前缀的文本块。
  */
-export declare function systemInstructionsText(system: string, updated?: boolean, bridgeMode?: 'mcp' | 'delegate', guidance?: ImageReadGuidance): string;
+export declare function systemInstructionsText(system: string, updated?: boolean, bridgeMode?: 'mcp' | 'delegate', guidance?: ImageReadGuidance, ptcOnly?: boolean): string;
 /** 序列化结果:prompt 文本 + ACP 原生图片内容块(base64)。 */
 export interface SerializedPrompt {
     prompt: string;
