@@ -50,7 +50,7 @@
     "@deepseek-ai/dsh-tools": "0.2.2-rc.3",
     "@deepseek-ai/dsh-util-values": "0.2.2-rc.3",
     "@deepseek-ai/schemastery": "^3.0.0",
-    "@flg1217/dsh-mcp-tool-server": "git+https://github.com/Elgalas/dsh-mcp-tool-server.git#v0.1.3",
+    "@flg1217/dsh-mcp-tool-server": "git+https://github.com/Elgalas/dsh-mcp-tool-server.git#f359bb9b90d7fa14070b7d6c24a245061b43b0e6",
     "@types/node": "^22.0.0",
     "typescript": "~5.7.2",
     "vitest": "^3.0.5"
