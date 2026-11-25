@@ -73,10 +73,10 @@ describe('buildPrompt:图片处理(ACP 原生内容块 + 落盘 Read 通道)', (
     })
     expect(readImage).toHaveBeenCalledTimes(1)
     expect(prompt).toContain('User: 看图')
-    // 落盘路径提示:CLI 对不支持图片的模型会过滤 ACP/工具结果图片,
-    // 模型按此路径用 Read 读图(CLI 原生 Read 不过滤)。
+    // 落盘路径提示:CLI 会过滤 ACP/工具结果里的图片,模型按此路径用
+    // CLI 原生 ViewImage 读图(该通道不过滤;Read 对图片只回"请用 ViewImage")。
     expect(prompt).toContain('[图片已保存到本地文件:')
-    expect(prompt).toContain('(用 Read 工具读取查看)]')
+    expect(prompt).toContain('(用 ViewImage 工具读取)]')
     expect(prompt).not.toContain('附带图片')
     expect(images).toEqual([{ data: Buffer.from([1, 2, 3, 4]).toString('base64'), mimeType: 'image/png' }])
   })

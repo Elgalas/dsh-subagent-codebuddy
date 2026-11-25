@@ -1,7 +1,7 @@
 /**
- * 读图引导分流测试:读图走 CLI 原生 Read(已放行;CLI 内置读图管线对任意模型
- * 适配——实测纯文本模型经 Read 读图也能看到图片内容,而 MCP 工具结果的图片
- * 会被 CLI 按模型能力过滤)。AGY 转述仅兜底(原生读图不可用)或用户显式要求;
+ * 读图引导分流测试:读图走 CLI 原生 ViewImage(已放行;MCP 工具结果的图片会被
+ * CLI 按模型能力过滤,只有内置读图通道不过滤)。2026-11-25 实测:CLI 的 Read
+ * 对图片只回"请用 ViewImage 工具查看",解图由 ViewImage 完成。AGY 转述仅兜底或用户显式要求;
  * 工具缺席时如实说明——尾注(promptTailFor)与 system 位
  * (systemInstructionsText)两侧口径一致。
  */
@@ -10,16 +10,16 @@ import { promptTailFor } from '../src/pump.ts'
 import { systemInstructionsText } from '../src/serialize.ts'
 
 describe('promptTailFor(读图引导)', () => {
-  it('原生:指 Read 工具、说明由 CodeBuddy 侧适配,AGY 转述仅用户要求', () => {
+  it('原生:指 ViewImage 工具,AGY 转述仅用户要求', () => {
     const delegate = promptTailFor('delegate', 'native')
-    expect(delegate).toContain('读图片用 Read 工具')
-    expect(delegate).toContain('CodeBuddy 侧适配')
+    expect(delegate).toContain('读图片用 ViewImage 工具')
+    expect(delegate).not.toContain('读图片用 Read 工具')
     expect(delegate).toContain('除非用户明确要求')
     expect(delegate).not.toContain('读图片用 dsh_read_image_agy——')
 
     const mcp = promptTailFor('mcp', 'native')
-    expect(mcp).toContain('读图片用 Read 工具')
-    expect(mcp).toContain('CodeBuddy 侧适配')
+    expect(mcp).toContain('读图片用 ViewImage 工具')
+    expect(mcp).not.toContain('读图片用 Read 工具')
   })
 
   it('AGY 兜底:指 read_image_agy 并说明没有原生读图工具', () => {
@@ -45,14 +45,14 @@ describe('promptTailFor(读图引导)', () => {
 })
 
 describe('systemInstructionsText(读图引导)', () => {
-  it('原生:system 位同样指 Read(与桥接模式无关)', () => {
+  it('原生:system 位同样指 ViewImage(与桥接模式无关)', () => {
     const text = systemInstructionsText('SYS', false, 'mcp', 'native')
     expect(text).toContain('SYS')
-    expect(text).toContain('读图片用 Read 工具')
-    expect(text).toContain('CodeBuddy 侧适配')
+    expect(text).toContain('读图片用 ViewImage 工具')
+    expect(text).not.toContain('读图片用 Read 工具')
     expect(text).not.toContain('会被拒绝')
 
-    expect(systemInstructionsText('SYS', false, 'delegate', 'native')).toContain('读图片用 Read 工具')
+    expect(systemInstructionsText('SYS', false, 'delegate', 'native')).toContain('读图片用 ViewImage 工具')
   })
 
   it('AGY 兜底:system 位指 read_image_agy 并说明没有原生读图工具', () => {

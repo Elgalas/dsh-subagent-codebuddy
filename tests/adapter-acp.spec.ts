@@ -360,15 +360,15 @@ describe('adapter(ACP):取消与错误', () => {
     })
   })
 
-  it('spawn 工具策略:内置工具全禁、Read 例外放行(实测 ACP 下 --disallowedTools 无效)', () => {
-    // mcp 模式:白名单只剩 Read(读图必需——CLI 内置读图管线对任意模型适配,
-    // 而 MCP 工具结果的图片会被 CLI 按模型能力过滤),其余内置工具全禁,
-    // 工具面主体是 MCP 通道的 dsh 工具。
-    expect(cliToolPolicyArgs()).toEqual(['--tools', 'Read'])
-    expect(cliToolPolicyArgs('mcp')).toEqual(['--tools', 'Read'])
+  it('spawn 工具策略:内置工具全禁、Read+ViewImage 例外放行(实测 ACP 下 --disallowedTools 无效)', () => {
+    // mcp 模式:白名单只剩 Read 与 ViewImage(读图必需——MCP 工具结果的图片会被
+    // CLI 按模型能力过滤,只有 CLI 内置读图通道不过滤)。2026-11-25 实测:Read
+    // 对图片只回"请用 ViewImage 工具查看",解图由 ViewImage 完成,缺一不可。
+    expect(cliToolPolicyArgs()).toEqual(['--tools', 'Read,ViewImage'])
+    expect(cliToolPolicyArgs('mcp')).toEqual(['--tools', 'Read,ViewImage'])
     // delegate 模式:必须放行委托工具合成器(白名单会连它一起过滤,
-    // 漏掉它 = 全部 dsh_* 委托工具不可见);Read 同样放行。
-    expect(cliToolPolicyArgs('delegate')).toEqual(['--tools', 'DelegateTool,Read'])
+    // 漏掉它 = 全部 dsh_* 委托工具不可见);Read/ViewImage 同样放行。
+    expect(cliToolPolicyArgs('delegate')).toEqual(['--tools', 'DelegateTool,Read,ViewImage'])
   })
 })
 

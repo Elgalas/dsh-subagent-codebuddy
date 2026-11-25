@@ -409,7 +409,7 @@ export type ImageReadGuidance = 'native' | 'agy' | 'unavailable'
  */
 function imageReadLine(guidance: ImageReadGuidance, prefix: string): string {
   if (guidance === 'native') {
-    return '读图片用 Read 工具直接读图片文件路径(已放行)——图片会进入你的上下文并由 CodeBuddy 侧适配;不要改用 '
+    return '读图片用 ViewImage 工具打开图片文件路径(已放行)——图片会进入你的上下文;不要改用 '
       + `${prefix}read_image_agy 让 AGY 转述,除非用户明确要求 AGY 转述`
   }
   if (guidance === 'agy') {
@@ -439,7 +439,7 @@ export function dshDelegationNote(guidance: ImageReadGuidance): string {
   '- toolId 必须用小写下划线原名:dsh_bash ✓、Dsh-bash ✗、dsh-bash ✗。绝不要发空的 DelegateTool 调用(delegate_tool {})来"枚举工具"——它会挂起整个回合且不会有任何返回。不确定某个工具是否存在时,直接按原工具名加 dsh_ 前缀试即可。',
   '- JSON 参数转义:要在文件里写字面反斜杠+n(如 Python 的 print("\\n"))时,JSON 参数必须写 \\\\n(双反斜杠);写单 \\\\n 会按 JSON 标准解析成真实换行——这是 JSON 语义不是工具的错。含大量转义的文件优先用 dsh_write 的 content 配 chr(10)/拼接构造,或分段小步写入。',
   `- DelegateTool 前台执行 ${CLI_TOOL_CALL_TIMEOUT_S} 秒超时:可能超过 20 秒的命令(构建/测试/对战模拟/服务等)一律 dsh_bash + run_in_background:true——任务进侧栏"后台任务",完成时自动通知并唤醒你继续;前台只跑秒级命令。绝不要用 docker exec -d、自写轮询脚本等外部后台方式:它们不进 dsh——面板不显示、完成收不到,回合结束后对话显示"已完成"而任务还在跑,用户只能来催你。`,
-  `- CLI 原生工具(Bash/PowerShell/Edit/Write/Glob/Grep/Read 等)已**全部禁用**:同类能力一律直接用 dsh_<原工具名>;${imageReadLine(guidance, 'dsh_')}。不要换方式绕过(例如把命令包成脚本执行)。`,
+  `- CLI 原生工具(Bash/PowerShell/Edit/Write/Glob/Grep 等)已**全部禁用**,仅 Read 与 ViewImage 放行(文本与图片):同类能力一律直接用 dsh_<原工具名>;${imageReadLine(guidance, 'dsh_')}。不要换方式绕过(例如把命令包成脚本执行)。`,
   '- 规划工作流:不要试图切换 CLI 的模式(EnterPlanMode 已禁用——CLI 的 plan 模式会拒绝后续修改类调用并把整个回合判失败中断)。dsh 有自己的计划模式:dsh 会通过 plan 段落引导你"先探索、出计划"(由用户开启),完成探索后用 dsh_exit_plan_mode 提交计划给用户审批;日常直接干活即可。',
   '- 沙箱拒绝不绕行:dsh_bash 报 [sandbox: file access denied ...] 时,不要改用 CLI 自带工具执行同一命令绕过沙箱;按工具描述用 sandbox_permissions + justification 走提权审批(审批弹窗即用户同意);被拒或会话禁用审批时即为最终结果,不要换路重试。',
   '- 委派子任务:先 dsh_list_subagent_models 查可用路由,再用 dsh_subagent 委派(默认后台;结算通知会唤醒你);继续同一子代理用 dsh_send_message(input.childId)。不要用 CLI 自带的 agent/Task 工具。',
@@ -463,8 +463,8 @@ export function mcpDelegationNote(
     : new Set(surface.filter(tool => isBridgeEligible(tool.name)).map(tool => tool.name))
   const exposed = names === undefined || names.size === 0 ? undefined : [...names].map(name => `mcp__dsh__${name}`)
   const exposeLine = exposed === undefined
-    ? '- 一律使用 mcp__dsh__<工具名>,参数按各工具自带 schema 传。CLI 原生工具已**全部禁用**,不在你的工具列表里,不要尝试。'
-    : `- 本会话可用的 dsh 工具就是这些(CLI 原生工具已**全部禁用**,不要尝试):${exposed.join('、')}。参数按各工具自带 schema 传。`
+    ? '- 一律使用 mcp__dsh__<工具名>,参数按各工具自带 schema 传。CLI 原生工具已**全部禁用**(仅 Read/ViewImage 放行,用于文本与图片),不要尝试其余原生工具。'
+    : `- 本会话可用的 dsh 工具就是这些(CLI 原生工具已**全部禁用**,仅 Read/ViewImage 放行):${exposed.join('、')}。参数按各工具自带 schema 传。`
   // 具体工具名按面取:win32 没有 bash、插件没装 subagent 时,写死名字会把
   // 模型引向 `Tool mcp__dsh__bash not found in agent cli`(旧会话实测)。
   const shell = names?.has('bash') === true ? 'bash' : names?.has('pwsh') === true ? 'pwsh' : undefined
@@ -509,7 +509,9 @@ export function ptcDelegationNote(guidance: ImageReadGuidance): string {
   '本次调用由 dsh 框架发起:你(CodeBuddy)作为 dsh 的模型后端运行,当前会话是 dsh 的 PTC(程序化工具调用)预设。',
   '**只有 mcp__dsh__run_code 能直接调用**(输入 `{code, description}`);调用任何其他工具名都会被 dsh 判为未知工具并使整个回合失败——不要在工具列表里找 bash/read/edit,也不要尝试直接调它们。',
   '- dsh 的全部工具都在 run_code 程序里通过 `tools` 对象调用:`tools.read({path})`、`tools.bash({command})`、`tools.edit({...})`、`tools.write({...})`、`tools.glob({pattern})`、`tools.grep({pattern})`……(名字就是 dsh 工具名;参数按 dsh 工具 schema)。',
-  `- ${imageReadLine(guidance, 'tools.')}:在程序里调 tools.read_image({ref}) 取图,不要假设自己"看不到图"。`,
+  guidance === 'unavailable'
+    ? '- 读图片:本会话没有可用的读图工具,需要读图时如实告知用户。'
+    : '- 读图片:在程序里调 tools.read_image({ref}) 取图(图片随程序输出回到上下文),不要假设自己"看不到图";CLI 原生 ViewImage 在 PTC 下不可用。',
   '- 长命令:程序里 `await tools.bash({command, run_in_background: true})` 进 dsh 后台任务面板,完成时会唤醒你继续;前台调用会阻塞程序并可能超时。',
   '- 委派子任务:`tools.list_subagent_models()` 查路由,再 `tools.subagent({prompt, ...})`;继续同一子代理用 `tools.send_message({childId, message})`。',
   '- 沙箱拒绝不绕行:tools.bash 报 [sandbox: file access denied ...] 时,按工具描述用 sandbox_permissions + justification 走提权审批(弹窗即用户同意);被拒即为最终结果,不要换方式重试。',

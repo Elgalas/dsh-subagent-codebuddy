@@ -43,11 +43,12 @@ export const DEFAULT_ACP_RUN_TIMEOUTS = {
  *   难复现)。禁掉内置工具 = 镜像路径不再被触发,这一失败面整体消失;
  * - 原白名单里的 ToolSearch/Skill/WebSearch 与 dsh 侧能力重复:走 dsh
  *   才有审批/沙箱/会话审计/后台面板;
- * - **Read 例外(读图必需)**:MCP 工具结果里的图片会被 CLI 按模型能力过滤
- *   (`function_call_result` → `[Image content filtered - current model does
- *   not support images]`),而 CLI 内置 Read 的图片不走该过滤(实测纯文本
- *   模型经 Read 读图也能看到图片内容)——读图走 Read 是唯一对任意模型
- *   可用的通道;dsh 原生 `read_image` 仍保留(对支持图片的模型更直接)。
+ * - **Read + ViewImage 例外(读图必需)**:MCP 工具结果里的图片会被 CLI 按模型
+ *   能力过滤(`function_call_result` → `[Image content filtered - current model
+ *   does not support images]`),CLI 内置读图通道不过该过滤。2026-11-25 实测:
+ *   `Read` 对图片只回"这是图片文件,请用 ViewImage 工具查看",真正解图的是
+ *   **ViewImage**——只放行 Read 等于没有读图能力。dsh 原生 `read_image` 仍保留
+ *   (对支持图片的模型更直接)。
  *
  * 为什么用 `--tools` 而不是 `--disallowedTools`:实测(2026-09-13,ACP 对照
  * 实验)`--disallowedTools` 在 `--acp` 模式下**完全不生效**——模型仍报
@@ -77,12 +78,12 @@ export function cliToolPolicyArgs(
   // ModelBehaviorError(旧会话根因之一)。读图改走 run_code 程序内的
   // tools.read_image,结果随程序输出带回,不经 CLI 图片通道。
   if (ptcOnly) return ['--tools', '']
-  // Read 放行(读图必需):CLI 内置读图管线对任意模型适配(实测纯文本模型经
-  // Read 读图也能看到图片内容),而 MCP 工具结果里的图片会被 CLI 按模型能力
+  // Read + ViewImage 放行(读图必需):MCP 工具结果里的图片会被 CLI 按模型能力
   // 过滤(function_call_result → "[Image content filtered - current model does
-  // not support images]")——对不支持图片的模型,Read 是唯一能拿到图片内容的
-  // 通道。其余内置工具仍全禁(对等能力走 dsh)。
-  return ['--tools', bridgeMode === 'delegate' ? 'DelegateTool,Read' : 'Read']
+  // not support images]"),CLI 内置读图不过该过滤。两者分工(2026-11-25 实测):
+  // Read 对图片只回"请用 ViewImage 工具查看",解图由 ViewImage 完成;只放行
+  // Read 会让读图静默失效。Read 保留给文本文件,其余内置工具仍全禁。
+  return ['--tools', bridgeMode === 'delegate' ? 'DelegateTool,Read,ViewImage' : 'Read,ViewImage']
 }
 
 /**

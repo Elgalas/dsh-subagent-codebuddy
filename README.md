@@ -30,25 +30,26 @@ DeepSeek Harness（DSH）的 CodeBuddy CLI 插件，包名为 `@elgalas/dsh-suba
 | **opt-in 工具** | `subagent_codebuddy` + `list_codebuddy_models`（`registerSubagentTools: true` 开启；默认关闭，推荐通用工具） |
 | **压缩归属** | codebuddy 会话的压缩由 **CLI 负责**（dsh 的自动压缩被插件接管，不压镜像）；CLI 压完之后镜像成 dsh 的标准压缩卡，**零 token**（见 §三「压缩归属」） |
 
-**语义说明（主代理轮，重要）**：ACP CLI 自带 agent 循环，但它的**内置工具只放行 `Read`**
-（spawn 传 `--tools Read`——读图必需，见下；delegate 模式为 `DelegateTool,Read`，见 §三「工具桥」）。
+**语义说明（主代理轮，重要）**：ACP CLI 自带 agent 循环，但它的**内置工具只放行 `Read` 与 `ViewImage`**
+（spawn 传 `--tools Read,ViewImage`——读图必需，见下；delegate 模式为 `DelegateTool,Read,ViewImage`，见 §三「工具桥」）。
 因此：
 
 - 模型的工具面 = dsh 侧工具（MCP 模式下是 `mcp__dsh__bash` / `mcp__dsh__edit`
-  / `mcp__dsh__read_image` …，delegate 模式下是 `dsh_bash` / `dsh_edit` …）+ CLI 原生 `Read`。dsh 工具调用
+  / `mcp__dsh__read_image` …，delegate 模式下是 `dsh_bash` / `dsh_edit` …）+ CLI 原生 `Read` / `ViewImage`。dsh 工具调用
   **在 dsh 侧执行，受 dsh 的沙箱与审批约束**，并进会话日志、审计与后台任务面板。
-- 读图片走 **CLI 原生 `Read`**：CLI 的内置读图管线对任意模型适配（实测纯文本模型经
-  Read 读图也能看到图片内容），而 **MCP 工具结果里的图片会被 CLI 按模型能力过滤**
-  （`function_call_result` → `[Image content filtered - current model does not support
-  images]`）。dsh 的 `read_image` 仍可用（对支持图片的模型更直接：图片经 MCP image
-  内容块回传，与 CLI 原生读图落点相同）；`read_image_agy`（AGY 转述）作为兜底与用户
-  显式要求的选项保留。指路由尾注与 system 位下发。
+- 读图片走 **CLI 原生 `ViewImage`**：CLI 内置读图通道不过模型能力过滤，而 **MCP 工具
+  结果里的图片会被过滤**（`function_call_result` → `[Image content filtered - current
+  model does not support images]`）。2026-11-25 实测：CLI 的 `Read` 对图片只回一句
+  「这是图片文件，请用 ViewImage 工具查看」，真正解图的是 `ViewImage`——只放行 `Read`
+  会让读图静默失效（0.1.x 的缺陷），因此两者必须一起放行。dsh 的 `read_image` 仍可用
+  （对支持图片的模型更直接）；`read_image_agy`（AGY 转述）作为兜底与用户显式要求的
+  选项保留。指路由尾注与 system 位下发。
   模型目录（主选择器 / `list_subagent_models` / 设置卡「获取所有模型」）带 `· 支持图片输入` / `· 仅文本` 后缀。
 - 文本/思考/工具卡片仍以会话事件实时回传 dsh 界面。
 
 > 为什么几乎全禁而不是白名单（2026-09-18）：CLI 原生工具要进 dsh 会话，必须在会话 scope 注册
 > 「回放镜像」承接；镜像注册一旦丢失，该会话的原生调用就永久报 `unknown tool "cli_read"`
-> （偶发、不可复现）。全禁后这条路径不再被触发；`Read` 是唯一例外（读图通道，见上）。
+> （偶发、不可复现）。全禁后这条路径不再被触发；`Read` 与 `ViewImage` 是唯一例外（读图通道，见上）。
 > 逃生口：`extraArgs` 排在 `--tools` 之后，可用 `extraArgs: ['--tools', 'default']` 覆盖本策略。
 > 历史注记：更早的版本让 CLI 用自己的工具链、dsh 沙箱不参与——**安全模型以本节为准**。
 
