@@ -6,6 +6,7 @@
  * (systemInstructionsText)两侧口径一致。
  */
 import { describe, expect, it } from 'vitest'
+import { imageGuidanceFrom } from '../src/adapter.ts'
 import { promptTailFor } from '../src/pump.ts'
 import { systemInstructionsText } from '../src/serialize.ts'
 
@@ -65,5 +66,35 @@ describe('systemInstructionsText(读图引导)', () => {
   it('工具缺席:如实说明', () => {
     const text = systemInstructionsText('SYS', false, 'delegate', 'unavailable')
     expect(text).toContain('没有可用的读图工具')
+  })
+})
+
+describe('imageGuidanceFrom(档位判定)', () => {
+  /** 判定入参默认值:普通会话 + tools 服务在场但两个读图工具都查不到。 */
+  const facts = {
+    ptcOnly: false,
+    readImage: false,
+    agy: false,
+    toolsUnavailable: false,
+    modelImageCapable: true,
+  }
+
+  it('非 PTC 恒 native:子代理作用域查不到 read_image 也不降级', () => {
+    // 2026-11-27 实测:子代理能调 mcp__dsh__read_image,宿主平面却查不到,
+    // 旧逻辑据此判 unavailable,尾注与本会话实际能力自相矛盾。
+    expect(imageGuidanceFrom(facts)).toBe('native')
+    expect(imageGuidanceFrom({ ...facts, modelImageCapable: false })).toBe('native')
+  })
+
+  it('PTC:ViewImage 已禁,按 dsh read_image 在场分级', () => {
+    expect(imageGuidanceFrom({ ...facts, ptcOnly: true, readImage: true })).toBe('native')
+    expect(imageGuidanceFrom({ ...facts, ptcOnly: true, agy: true })).toBe('agy')
+    expect(imageGuidanceFrom({ ...facts, ptcOnly: true })).toBe('unavailable')
+  })
+
+  it('PTC 且 tools 服务缺席:按模型能力兜底', () => {
+    expect(imageGuidanceFrom({ ...facts, ptcOnly: true, toolsUnavailable: true })).toBe('native')
+    expect(imageGuidanceFrom({ ...facts, ptcOnly: true, toolsUnavailable: true, modelImageCapable: false }))
+      .toBe('unavailable')
   })
 })

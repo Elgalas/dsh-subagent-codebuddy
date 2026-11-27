@@ -87,6 +87,40 @@ function systemHashOf(system: string | undefined, guidance: ImageReadGuidance = 
   return createHash('sha256').update(`${system}\u0000${guidance}`).digest('hex').slice(0, 16)
 }
 
+/** dsh tools 服务的最小面(按名取工具;缺席视为未注册)。 */
+interface ToolsServiceFace {
+  get?: (name: string, scope?: unknown) => unknown
+}
+
+/**
+ * 读图引导档位的纯判定(与 ctx、能力索引解耦,便于单测)。
+ *
+ * **非 PTC 恒 native**:CLI 的 `--tools` 白名单固定放行 `Read,ViewImage`
+ * (acp.ts 的 `cliToolPolicyArgs`),ViewImage 走 CLI 自己的读图管线、不受
+ * "MCP 工具结果的图片按模型能力过滤"的限制——读图能力由 CLI 策略决定,
+ * 与 dsh 工具注册表无关(注册表在宿主平面,工具按 agent 作用域挂载,子代理
+ * 会话查不到 `read_image`)。**PTC 例外**:`--tools ''` 禁掉 ViewImage,
+ * 只能走程序里的 `tools.read_image`,故按在场情况分级。
+ * @param facts - 判定所需事实(见各字段)。
+ * @returns 读图引导档位。
+ */
+export function imageGuidanceFrom(facts: {
+  /** 本 step 的工具面是否就是 PTC 的 `run_code` 单工具面。 */
+  readonly ptcOnly: boolean
+  /** dsh 侧 `read_image` 是否已注册(子代理作用域下宿主平面看不到)。 */
+  readonly readImage: boolean
+  /** dsh 侧 `read_image_agy` 是否已注册(AGY 转述)。 */
+  readonly agy: boolean
+  /** tools 服务是否缺席(极简/测试上下文)。 */
+  readonly toolsUnavailable: boolean
+  /** 模型是否原生支持图片输入(仅在 tools 服务缺席时兜底)。 */
+  readonly modelImageCapable: boolean
+}): ImageReadGuidance {
+  if (!facts.ptcOnly) return 'native'
+  if (facts.readImage || (facts.toolsUnavailable && facts.modelImageCapable)) return 'native'
+  return facts.agy ? 'agy' : 'unavailable'
+}
+
 /** purpose 调用的隔离工作目录(懒建;一次性旁路会话不落进用户项目)。 */
 function purposeWorkDir(): string {
   const dir = join(tmpdir(), 'codebuddy-duty')
@@ -336,32 +370,47 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
   }
 
   /**
-   * 读图引导:读图走 **CLI 原生 Read**(`--tools` 白名单固定放行;CLI 内置
-   * 读图管线对任意模型适配,而 MCP 工具结果里的图片会被 CLI 按模型能力过滤
-   * ——`function_call_result` → `[Image content filtered]`)。dsh 的 read_image
-   * 工具在场即按原生档引导(它同时服务支持图片的模型);工具缺席时才退回
-   * AGY 转述/如实说明。tools 服务不可用(极简/测试上下文)时按模型能力回退。
+   * 读图引导:判 CLI 侧通道,不判 dsh 工具注册表。
+   *
+   * 非 PTC 会话恒为 native —— `--tools` 白名单固定放行 `Read,ViewImage`
+   * (见 acp.ts 的 `cliToolPolicyArgs`),ViewImage 走 CLI 自己的读图管线,
+   * 不受"MCP 工具结果的图片按模型能力过滤"那条限制(`function_call_result`
+   * → `[Image content filtered]`)。所以"能不能读图"由 CLI 策略决定:工具
+   * 注册表在宿主平面,而工具按 agent 作用域挂载,子代理会话在这里查不到
+   * `read_image`,曾把本来可用的读图误判成 unavailable(2026-11-27 实测:
+   * 子代理成功调用 `mcp__dsh__read_image`,尾注却写着"本会话没有可用的读图
+   * 工具")。
+   *
+   * PTC 会话例外:`--tools ''` 已禁掉 ViewImage,读图只能走程序里的
+   * `tools.read_image`,于是按 dsh 工具在场情况分级(AGY 转述兜底)。
    * @param model - 本次请求路由到的 CodeBuddy 模型 id(仅回退路径使用)。
+   * @param surface - 本 step 的模型工具面(只用于识别 PTC 单工具面;未知按非 PTC)。
    * @returns 读图引导档位。
    */
-  private imageGuidanceFor(model: string): ImageReadGuidance {
-    const tools = (this.ctx as unknown as { get?: (key: string) => unknown }).get?.('tools') as
-      | { get?: (name: string, scope?: unknown) => unknown }
-      | undefined
-    if (tools === undefined) {
-      return this.imageCapableOf(model) ? 'native' : (this.hasTool('read_image_agy') ? 'agy' : 'unavailable')
+  private imageGuidanceFor(model: string, surface?: readonly DshSurfaceTool[]): ImageReadGuidance {
+    const tools = this.toolsServiceOf()
+    return imageGuidanceFrom({
+      ptcOnly: isPtcOnlySurface(surface),
+      readImage: tools?.get?.('read_image') !== undefined,
+      agy: tools?.get?.('read_image_agy') !== undefined,
+      toolsUnavailable: tools === undefined,
+      modelImageCapable: this.imageCapableOf(model),
+    })
+  }
+
+  /** dsh 的 tools 服务(缺席返回 undefined:极简/测试上下文)。 */
+  private toolsServiceOf(): ToolsServiceFace | undefined {
+    try {
+      return (this.ctx as unknown as { get?: (key: string) => unknown }).get?.('tools') as ToolsServiceFace | undefined
+    } catch {
+      return undefined
     }
-    if (tools.get?.('read_image') !== undefined) return 'native'
-    return tools.get?.('read_image_agy') !== undefined ? 'agy' : 'unavailable'
   }
 
   /** dsh tools 服务里是否存在该工具(缺席时不指路不存在的工具)。 */
   private hasTool(name: string): boolean {
     try {
-      const tools = (this.ctx as unknown as { get?: (key: string) => unknown }).get?.('tools') as
-        | { get?: (name: string, scope?: unknown) => unknown }
-        | undefined
-      return tools?.get?.(name) !== undefined
+      return this.toolsServiceOf()?.get?.(name) !== undefined
     } catch {
       return false
     }
@@ -454,8 +503,9 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
       ? (defaultEffort === '' ? undefined : defaultEffort)
       : String(options.reasoningEffort)
     const bridgeMode = this.options.bridgeModeOf?.() ?? this.options.bridgeMode
-    // 读图引导按工具在场情况变化(read_image 在场即原生;AGY 仅兜底)。
-    const imageGuidance = this.imageGuidanceFor(model)
+    // 读图引导按 CLI 侧通道判定(非 PTC 恒 native:ViewImage 恒放行;PTC 内按
+    // dsh read_image 在场分级,AGY 仅兜底)。
+    const imageGuidance = this.imageGuidanceFor(model, toolSurface)
     const cwd = childSession.header.cwd ?? process.cwd()
     // dsh 的 system prompt 对齐原生语义:主代理轮也要带(工具桥已齐,旧注释
     // "它描述的是 CodeBuddy 调不到的工具"已失效)。带法见 systemHashOf:
@@ -669,7 +719,9 @@ export class CodebuddyLlmAdapter extends LlmAdapter {
     const bridgeMode = this.options.bridgeModeOf?.() ?? this.options.bridgeMode
     // 请求级 model 优先(子代理可经 agentOptions.model 动态指定),回退到当前默认模型。
     const model = options.model ?? this.options.modelOf()
-    // 读图引导按工具在场情况变化(旁路会话同样要带,哈希与种子都要用)。
+    // 读图引导(旁路会话同样要带,哈希与种子都要用)。这里**不传 surface**:
+    // 旁路 spawn 走的 `cliToolPolicyArgs(bridgeMode)` 没有 ptcOnly,ViewImage
+    // 恒放行,故引导恒为 native,与该进程实际的 `--tools` 一致。
     const imageGuidance = this.imageGuidanceFor(model)
     // 辅助调用(会话标题/压缩)是**旁路查询**:必须用一次性会话,绝不读写
     // 本会话的续接映射、也绝不原生种子——否则会抢写映射(实测:标题调用把
