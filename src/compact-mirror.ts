@@ -366,8 +366,11 @@ function appendMirroredCompaction(
     // 该包升级改名时这里要靠会话迁移表 RENAMED_PRODUCERS 同步。
     source: { kind: 'compact-checkpoint', compactionId },
   } as never)
+  // 字段名必须与 dsh 写入器一致(startSeq/endSeq):写成 start/end 会让 append 抛
+  // SessionFormatError,于是 compaction/end 永远写不出来,事务悬空——该会话下次
+  // 打开时报 "crosses an open compaction",连带整个日志读不出来。
   session.append('user/message', checkpoint, {
-    surfaceOp: { op: 'replace', start: range.start, end: range.end },
+    surfaceOp: { op: 'replace', startSeq: range.start, endSeq: range.end },
     sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...range.shadowedSeqs],
   })
   session.append('compaction/end', lifecycle)
@@ -413,11 +416,19 @@ function selectMirrorRange(
     keepFromIdx = index
     if (accumulated >= retainTokens) break
   }
+  // 受保护的系统头(与 dsh 核心 `selectCompactableRange` 同判据):surface 第 0 个节点
+  // 若是 `system/message` 就永不进入遮蔽区间,否则 append 会抛 SessionFormatError
+  // "compaction cannot shadow the protected system head",整条日志当场损坏。
+  // 判据必须取"当前 surface 的第 0 个节点",而不是"日志里第一条 append 的
+  // system/message"——头本身会被 system/message 的 replace 整体替换,seq 随之改变。
+  const surfaceHeadSeq = session.surface.nodes[0]
+  const firstIdx = surfaceHeadSeq !== undefined && session.eventAt?.(surfaceHeadSeq)?.type === 'system/message' ? 1 : 0
+  if (keepFromIdx <= firstIdx) return null
   // 切点必须落在工具配对平衡处(否则会切断 tool-call / tool-result)。
-  while (keepFromIdx > 0 && !cutBalancedBefore(session, nodes[keepFromIdx]!.seq)) keepFromIdx -= 1
-  if (keepFromIdx <= 0) return null
+  while (keepFromIdx > firstIdx && !cutBalancedBefore(session, nodes[keepFromIdx]!.seq)) keepFromIdx -= 1
+  if (keepFromIdx <= firstIdx) return null
 
-  const selected = nodes.slice(0, keepFromIdx)
+  const selected = nodes.slice(firstIdx, keepFromIdx)
   const shadowedSeqs = selected.map(node => node.seq)
   return {
     start: shadowedSeqs[0]!,

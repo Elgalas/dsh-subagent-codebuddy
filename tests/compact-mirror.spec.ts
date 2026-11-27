@@ -205,7 +205,7 @@ describe('registerCompactMirror:把 CLI 的压缩镜像成 dsh 压缩事务', ()
     expect(summary!.data['provider']).toBe('codebuddy')
     // checkpoint 必须带 replace + compact-checkpoint 来源标记,UI 才认它是压缩卡。
     expect(checkpoint!.data['source']).toEqual({ kind: 'compact-checkpoint', compactionId })
-    expect(checkpoint!.surfaceOp).toEqual({ op: 'replace', start: 1, end: 2 })
+    expect(checkpoint!.surfaceOp).toEqual({ op: 'replace', startSeq: 1, endSeq: 2 })
     expect(JSON.stringify(checkpoint!.data['content'])).toContain('automatically generated checkpoint')
     expect(end!.data['compactionId']).toBe(compactionId)
     expect(harness.infos.some(message => message.includes('未消耗 token'))).toBe(true)
@@ -234,6 +234,34 @@ describe('registerCompactMirror:把 CLI 的压缩镜像成 dsh 压缩事务', ()
     expect(summary?.data['shadowedSeqs']).toEqual([1, 2, 3, 4])
     expect(summary?.data['shadowedRange']).toEqual({ start: 1, end: 4 })
     expect(summary?.data['shadowedTokenCount']).toBe(40)
+  })
+
+  it('不遮蔽受保护的系统头(头已被 system/message 的 replace 换到 surface 首位)', async () => {
+    const harness = makeHarness({
+      events: [
+        { seq: 1, type: 'system/message' },
+        { seq: 2, type: 'user/message' },
+        { seq: 3, type: 'assistant/message' },
+        { seq: 4, type: 'user/message' },
+        // 系统提示词被整体替换,surface 首位因此变成 seq 9。
+        { seq: 9, type: 'system/message' },
+      ],
+      surface: [9, 2, 3, 4],
+      nodes: [9, 2, 3, 4].map(seq => ({ seq, tokens: 100, heuristicTokens: 100 })),
+      totalTokens: 400,
+    })
+    await harness.fire()
+    writeRecord(periodicSummary('s'))
+    await harness.fire()
+
+    const summary = harness.appended.find(entry => entry.type === 'compaction/summary')
+    const checkpoint = harness.appended.find(entry => entry.type === 'user/message')
+    // 遮蔽 9 会触发 "compaction cannot shadow the protected system head",
+    // 整个日志读不出来 —— 区间必须从头部之后开始。
+    expect(summary?.data['shadowedSeqs']).toEqual([2, 3])
+    expect(summary?.data['shadowedSeqs']).not.toContain(9)
+    expect(checkpoint!.surfaceOp).toEqual({ op: 'replace', startSeq: 2, endSeq: 3 })
+    expect(summary?.data['shadowedRange']).toEqual({ start: 2, end: 3 })
   })
 
   it('首次见到会话时跳到文件末尾:不回放历史压缩', async () => {
